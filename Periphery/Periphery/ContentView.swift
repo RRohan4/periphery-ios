@@ -9,6 +9,8 @@
 //              about. Six rows, all expected green.
 //  Compute     where Core ML plans to run each operation. Meaningless in the
 //              simulator (no Neural Engine); run it on the phone.
+//  Latency     the number the port exists for: per-frame cost of backbone,
+//              gather, head and decode, and whether it survives ten minutes.
 //
 
 import SwiftUI
@@ -20,6 +22,8 @@ struct ContentView: View {
                 .tabItem { Label("Self-check", systemImage: "checkmark.seal") }
             ComputePlanView()
                 .tabItem { Label("Compute", systemImage: "cpu") }
+            BenchmarkView()
+                .tabItem { Label("Latency", systemImage: "speedometer") }
         }
     }
 }
@@ -184,6 +188,117 @@ struct ComputePlanView: View {
         }
         summaries = loaded
         failures = errors
+    }
+}
+
+// MARK: - Latency
+
+struct BenchmarkView: View {
+    @State private var report: BenchmarkReport?
+    @State private var error: String?
+    @State private var running = false
+    @State private var progress = ""
+
+    /// Short burst answers "how fast"; the long run answers "for how long",
+    /// which is a different question and the one phones usually fail.
+    private let burst = 200
+    private let sustained = 18_000
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button("Burst — \(burst) frames") { start(frames: burst) }
+                    Button("Sustained — 10 min at 30 fps") { start(frames: sustained) }
+                }
+                .disabled(running)
+
+                if running {
+                    Section { HStack { ProgressView(); Text(progress).font(.caption) } }
+                }
+
+                if let report {
+                    Section("Result") {
+                        LabeledContent("fps", value: String(format: "%.1f", report.fps))
+                        LabeledContent("median", value: ms(report.totalMedian))
+                        LabeledContent("p95", value: ms(report.totalP95))
+                        LabeledContent("worst", value: ms(report.totalWorst))
+                    }
+                    Section("Per stage (median)") {
+                        LabeledContent("backbone", value: ms(report.backboneMedian))
+                        LabeledContent("gather", value: ms(report.gatherMedian))
+                        LabeledContent("head", value: ms(report.headMedian))
+                        LabeledContent("decode", value: ms(report.decodeMedian))
+                    }
+                    Section("Thermal") {
+                        LabeledContent("start", value: report.startThermal)
+                        LabeledContent("end", value: report.endThermal)
+                        if report.thermalTransitions.isEmpty {
+                            Text("no transitions").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            ForEach(report.thermalTransitions, id: \.self) { transition in
+                                Text(transition).font(.system(.caption, design: .monospaced))
+                            }
+                        }
+                        LabeledContent("low power",
+                                       value: report.lowPowerMode ? "ON" : "off")
+                        LabeledContent("memory available",
+                                       value: String(format: "%.0f MB", report.availableMemoryMB))
+                    }
+                    Section {
+                        Text(report.summary)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                    } header: {
+                        Text("copyable")
+                    } footer: {
+                        Text("Desktop reference: 7.6 ms CUDA, 58.8 ms CPU. "
+                             + "Synthetic input, preprocessing excluded.")
+                    }
+                }
+
+                if let error {
+                    Text(error)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.red)
+                }
+            }
+            .navigationTitle("Latency")
+        }
+    }
+
+    private func ms(_ seconds: Double) -> String {
+        String(format: "%.1f ms", seconds * 1000)
+    }
+
+    private func start(frames: Int) {
+        running = true
+        error = nil
+        report = nil
+        progress = "warming up…"
+        // Off the main actor: a ten-minute run would otherwise wedge the UI and
+        // the watchdog would kill the app.
+        Task.detached(priority: .userInitiated) {
+            do {
+                let outcome = try Benchmark.run(frames: frames) { done, total in
+                    if done % 20 == 0 || done == total {
+                        Task { @MainActor in
+                            progress = "\(done) / \(total)"
+                        }
+                    }
+                }
+                await MainActor.run {
+                    report = outcome
+                    running = false
+                    print(outcome.summary)
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = String(describing: error)
+                    running = false
+                }
+            }
+        }
     }
 }
 
