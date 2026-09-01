@@ -96,7 +96,7 @@ enum ComputePlanProbe {
         var strays = [StrayOperation]()
 
         for operation in main.block.operations {
-            let opName = operation.operatorName ?? "unknown"
+            let opName = operation.operatorName
             // Weights and literals are not work; counting them would inflate
             // the CPU column with things that never execute.
             if opName == "const" { continue }

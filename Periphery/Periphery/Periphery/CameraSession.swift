@@ -97,7 +97,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         try? device.lockForConfiguration()
         if device.isFocusModeSupported(.locked) {
             // 1.0 is the far end of the lens range.
-            device.setFocusModeLockedWithLensPosition(1.0, completionHandler: nil)
+            device.setFocusModeLocked(lensPosition: 1.0)
         }
         if device.isExposureModeSupported(.continuousAutoExposure) {
             device.exposureMode = .continuousAutoExposure
