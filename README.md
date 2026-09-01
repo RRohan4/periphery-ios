@@ -15,6 +15,9 @@ models/backbone_static.mlpackage    23 MB, 15.21 M params
 models/head_static.mlpackage        7.1 MB,  3.67 M params
 models/coreml_export_report.json    conversion + ONNX numeric agreement
 docs/decode-contract.md             the exact handoff the Swift port must match
+Sources/Periphery/                  the Swift port of everything CoreML does not do
+Resources/                          golden vectors the port checks itself against
+tools/make_selfcheck.py             regenerates those goldens from the periphery repo
 ```
 
 ## The shape of the thing
@@ -77,11 +80,62 @@ The CPU column is the conservative floor for the phone. If the ANE engages,
 expect substantially better; if the measured number lands near 58.8 ms,
 something fell off the ANE and `MLComputePlan` will say what.
 
+## The Swift side
+
+```
+Sources/Periphery/Contract.swift       grid, anchors, frames, operating point
+Sources/Periphery/Calibration.swift    mount pose, focal matching, projection
+Sources/Periphery/ProjectionLUT.swift  the gather between the two models
+Sources/Periphery/Decode.swift         sigmoid, anchor decode, direction fold, circular NMS
+Sources/Periphery/Preprocess.swift     camera frame -> [1,3,256,512], vImage
+Sources/Periphery/Detector.swift       backbone -> gather -> head -> decode, with timings
+Sources/Periphery/SelfCheck.swift      runs the goldens against all of the above
+```
+
+Models are loaded by resource name and the head's three outputs are identified
+by their trailing dimension (4 classes, 9 box codes, 2 direction logits), not by
+the auto-generated coremltools output names, so a re-export cannot silently
+rename a call site.
+
+### Self-check
+
+The two `.mlpackage`s are gated against ONNX at export time. The Swift half is
+gated by `SelfCheck.run()`, which recomputes the anchor table, the voxel
+centres, the focal-matched crop, the projection matrix, the LUT and a full
+decode of 6720 fixed candidates, and diffs each against `Resources/`. Against
+the Python reference the port currently reproduces:
+
+| check | result |
+|---|---|
+| voxel centres | 6560, exact |
+| anchors | 6720 rows, max diff 3.8e-6 (float32 rounding) |
+| focal-matched crop | 824x412 at (170, 231), focal 565.6 |
+| projection matrix | exact |
+| projection LUT | 0 visibility and 0 index mismatches, 66.97% visible |
+| decode + NMS | 63 detections, every field within 2e-4 |
+
+That comparison has been run host-side against the Python; running it on the
+phone is what confirms the arithmetic survives the trip. Regenerate the goldens
+after any change to the geometry, from the `periphery` repo root:
+
+```
+PYTHONPATH=. .venv/bin/python ../periphery-ios/tools/make_selfcheck.py \
+    --out ../periphery-ios/Resources
+```
+
 ## Building
 
 Requires Xcode with an iOS 17 SDK or newer (Xcode 15+; Xcode 26 is the last
 version that runs on Intel Macs). Drag both `.mlpackage` directories into the
-Xcode project and let it generate the Swift interfaces.
+Xcode project and let it generate the Swift interfaces, then add
+`Sources/Periphery` and `Resources` to the target the same way (uncheck *Copy
+items if needed*, check the app target). `Resources` must land in *Copy Bundle
+Resources* or the self-check will report the goldens missing.
+
+Video stabilisation has to be off on the capture session. EIS and OIS change
+per-frame geometry unreported, which breaks both the fixed intrinsics the crop
+is computed from and the known extrinsics the LUT is built from --
+`cameraIntrinsicMatrixDeliveryEnabled` is unavailable while it is on anyway.
 
 ## Where the truth lives
 
