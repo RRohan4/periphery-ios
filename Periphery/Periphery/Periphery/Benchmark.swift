@@ -49,6 +49,8 @@ struct BenchmarkReport {
     var endThermal: String = ""
     var lowPowerMode: Bool = false
     var availableMemoryMB: Double = 0
+    /// What precision Core ML actually used for the tensors crossing its edge.
+    var precision: String = ""
 
     var summary: String {
         String(format: """
@@ -57,6 +59,7 @@ struct BenchmarkReport {
             total median %.1f ms, p95 %.1f ms, worst %.1f ms
             thermal %@ -> %@%@
             %.0f MB available, low power %@
+            tensors: %@
             """,
             frames, wallClock, fps,
             backboneMedian * 1000, gatherMedian * 1000,
@@ -65,7 +68,8 @@ struct BenchmarkReport {
             startThermal, endThermal,
             thermalTransitions.isEmpty ? "" : " (" + thermalTransitions.joined(separator: ", ") + ")",
             availableMemoryMB,
-            lowPowerMode ? "ON" : "off")
+            lowPowerMode ? "ON" : "off",
+            precision)
     }
 }
 
@@ -160,6 +164,7 @@ enum Benchmark {
         report.endThermal = describe(ProcessInfo.processInfo.thermalState)
         report.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         report.availableMemoryMB = Double(os_proc_available_memory()) / 1_048_576.0
+        report.precision = detector.precisionNote
         return report
     }
 
