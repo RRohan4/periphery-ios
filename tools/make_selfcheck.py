@@ -6,12 +6,12 @@ gated is everything hand-ported into Swift: the anchor table, the projection
 LUT, the box decode, the direction fold, the grid-to-vehicle transform and the
 circular NMS. Those are exactly the places a sign error hides, so this script
 dumps the reference answer for a fixed calibration and a fixed set of head
-tensors, and Sources/Periphery/SelfCheck.swift recomputes them on the phone.
+tensors, and SelfCheck.swift recomputes them on the phone.
 
 Run it from the periphery repo:
 
-    .venv/bin/python ../periphery-ios/tools/make_selfcheck.py \
-        --out ../periphery-ios/Resources
+    PYTHONPATH=. .venv/bin/python ../periphery-ios/tools/make_selfcheck.py \
+        --out ../periphery-ios/Periphery/Periphery/Periphery/Resources
 
 Nothing here touches the checkpoint: the head tensors are seeded noise. The
 point is agreement between two implementations of the same arithmetic, not
