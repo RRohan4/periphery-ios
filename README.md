@@ -15,8 +15,9 @@ models/backbone_static.mlpackage    23 MB, 15.21 M params
 models/head_static.mlpackage        7.1 MB,  3.67 M params
 models/coreml_export_report.json    conversion + ONNX numeric agreement
 docs/decode-contract.md             the exact handoff the Swift port must match
-Sources/Periphery/                  the Swift port of everything CoreML does not do
-Resources/                          golden vectors the port checks itself against
+Periphery/                          the Xcode project (app target: Periphery)
+Periphery/Periphery/Periphery/      the Swift port of everything CoreML does not do
+  .../Resources/                    golden vectors the port checks itself against
 tools/make_selfcheck.py             regenerates those goldens from the periphery repo
 ```
 
@@ -82,15 +83,24 @@ something fell off the ANE and `MLComputePlan` will say what.
 
 ## The Swift side
 
+All of it lives in `Periphery/Periphery/Periphery/`, the group Xcode created
+when the folder was added to the target:
+
 ```
-Sources/Periphery/Contract.swift       grid, anchors, frames, operating point
-Sources/Periphery/Calibration.swift    mount pose, focal matching, projection
-Sources/Periphery/ProjectionLUT.swift  the gather between the two models
-Sources/Periphery/Decode.swift         sigmoid, anchor decode, direction fold, circular NMS
-Sources/Periphery/Preprocess.swift     camera frame -> [1,3,256,512], vImage
-Sources/Periphery/Detector.swift       backbone -> gather -> head -> decode, with timings
-Sources/Periphery/SelfCheck.swift      runs the goldens against all of the above
+Contract.swift       grid, anchors, frames, operating point
+Calibration.swift    mount pose, focal matching, projection
+ProjectionLUT.swift  the gather between the two models
+Decode.swift         sigmoid, anchor decode, direction fold, circular NMS
+Preprocess.swift     camera frame -> [1,3,256,512], vImage
+Detector.swift       backbone -> gather -> head -> decode, with timings
+SelfCheck.swift      runs the goldens against all of the above
+Resources/           the goldens themselves
 ```
+
+`Periphery/Periphery/*.mlpackage` are the copies Xcode compiles into the app.
+`models/` stays the canonical export artefact -- the pair that
+`coreml_export_report.json` describes. Re-export replaces `models/`, then
+those get copied across.
 
 Models are loaded by resource name and the head's three outputs are identified
 by their trailing dimension (4 classes, 9 box codes, 2 direction logits), not by
@@ -120,17 +130,21 @@ after any change to the geometry, from the `periphery` repo root:
 
 ```
 PYTHONPATH=. .venv/bin/python ../periphery-ios/tools/make_selfcheck.py \
-    --out ../periphery-ios/Resources
+    --out ../periphery-ios/Periphery/Periphery/Periphery/Resources
 ```
 
 ## Building
 
 Requires Xcode with an iOS 17 SDK or newer (Xcode 15+; Xcode 26 is the last
 version that runs on Intel Macs). Drag both `.mlpackage` directories into the
-Xcode project and let it generate the Swift interfaces, then add
-`Sources/Periphery` and `Resources` to the target the same way (uncheck *Copy
-items if needed*, check the app target). `Resources` must land in *Copy Bundle
-Resources* or the self-check will report the goldens missing.
+Xcode project and let it generate the Swift interfaces. The Swift sources and
+`Resources` are already members of the target in the committed project, so a
+`git pull` is enough; only a *new* file needs File -> Add Files. `Resources`
+must sit in *Copy Bundle Resources* or the self-check reports the goldens
+missing.
+
+The app launches straight into the self-check screen (`ContentView.swift`) --
+six rows, all expected green, no camera and no model load involved.
 
 Video stabilisation has to be off on the capture session. EIS and OIS change
 per-frame geometry unreported, which breaks both the fixed intrinsics the crop
