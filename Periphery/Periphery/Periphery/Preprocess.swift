@@ -102,8 +102,9 @@ final class Preprocessor {
                                                             (255.0 - mean) / std,
                                                             -mean / std,
                                                             vImage_Flags(kvImageNoFlags))
-                if status != kvImageNoError {
-                    fatalError("vImageConvert_Planar8toPlanarF failed: \(status)")
+                guard status == kvImageNoError else {
+                    throw DetectorError.unexpectedShape(
+                        "vImageConvert_Planar8toPlanarF failed: \(status)")
                 }
             }
         }
