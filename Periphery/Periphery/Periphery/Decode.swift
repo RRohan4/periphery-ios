@@ -11,6 +11,7 @@
 //  The order of operations is not negotiable.
 
 import Foundation
+import simd
 
 /// One detection in vehicle coordinates: x forward, y left, z up, metres.
 struct Detection {

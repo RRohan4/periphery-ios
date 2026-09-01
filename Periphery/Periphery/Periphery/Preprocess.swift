@@ -17,6 +17,7 @@
 import Accelerate
 import CoreML
 import CoreVideo
+import simd
 
 final class Preprocessor {
 
