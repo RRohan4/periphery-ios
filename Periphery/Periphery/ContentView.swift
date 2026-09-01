@@ -276,6 +276,9 @@ struct BenchmarkView: View {
         error = nil
         report = nil
         progress = "warming up…"
+        // A ten-minute run outlives the screen timeout, and a locked screen
+        // suspends the app mid-measurement.
+        UIApplication.shared.isIdleTimerDisabled = true
         // Off the main actor: a ten-minute run would otherwise wedge the UI and
         // the watchdog would kill the app.
         Task.detached(priority: .userInitiated) {
@@ -290,12 +293,14 @@ struct BenchmarkView: View {
                 await MainActor.run {
                     report = outcome
                     running = false
+                    UIApplication.shared.isIdleTimerDisabled = false
                     print(outcome.summary)
                 }
             } catch {
                 await MainActor.run {
                     self.error = String(describing: error)
                     running = false
+                    UIApplication.shared.isIdleTimerDisabled = false
                 }
             }
         }
