@@ -310,7 +310,7 @@ struct LiveView: View {
                         snapshot.pitchDegrees, snapshot.focal, snapshot.cropDescription))
             Text("thermal \(snapshot.thermal) · dropped \(snapshot.dropped)"
                  + (snapshot.note.isEmpty ? "" : " · \(snapshot.note)"))
-                .foregroundStyle(snapshot.note.isEmpty ? .secondary : .red)
+                .foregroundStyle(snapshot.note.isEmpty ? Color.secondary : Color.red)
         }
         .font(.system(size: 11, design: .monospaced))
         .frame(maxWidth: .infinity, alignment: .leading)
