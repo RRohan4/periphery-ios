@@ -49,24 +49,55 @@ shipped halves agree to 1.7e-4 and 1.2e-4.
 
 ## Status
 
+Measured on an **iPhone 16 (A18)**, release build, sideloaded.
+
 | | |
 |---|---|
 | CoreML conversion | passes, both halves, iOS 17 target |
 | ONNX numeric agreement | 1.7e-4 backbone, 1.2e-4 head |
-| ANE residency | **unverified** — see below |
-| On-device latency | **unmeasured** — needs the phone |
-| Sustained / thermal FPS | **unmeasured** |
+| Swift port vs Python | 6/6 golden checks pass on device |
+| ANE residency | every operation planned on the Neural Engine, both halves |
+| On-device latency | **3.9 ms median**, p95 7.9 ms, worst 9.0 ms — 230 fps |
+| Sustained / thermal FPS | **unmeasured** — 10 min run pending |
 
-Nothing on this page has been run on an iPhone yet. Conversion succeeding on
-Linux is the only claim currently supported.
+### Latency, 200 frames after 10 warm-up passes
 
-The op inventory looked entirely ANE-native by inspection (conv, relu, add,
-upsample, max_pool, concat, reshape, transpose, stack), but the op-count
-extraction in the export script returned empty, so treat that as an
-expectation rather than a result. **Verify it on device with `MLComputePlan`**
-(iOS 17+), which reports the planned compute unit per operation. That is the
-substitute for Instruments' Core ML template, which needs a USB-tethered
-device and is therefore unavailable when building on a cloud Mac.
+| | backbone | gather | head | decode | total |
+|---|---|---|---|---|---|
+| iPhone 16 (A18) | 1.2 ms | 0.2 ms | 1.8 ms | 0.6 ms | **3.9 ms** |
+| desktop CUDA | 5.1 ms | 0.5 ms | 2.0 ms | — | 7.6 ms |
+| desktop CPU | 33.7 ms | 0.3 ms | 24.8 ms | — | 58.8 ms |
+
+The phone beats the desktop GPU by 2x and the CPU floor by 15x. Two details
+worth keeping attached to that number:
+
+* **The gather is 0.2 ms on the phone against 0.3 ms on a desktop CPU.** It is a
+  memory copy and it does not care what silicon it runs on. That is the
+  strongest evidence that splitting the model at the geometry op cost nothing.
+* **Core ML runs this in float16.** `image float16, volume float16` -- the ANE's
+  native precision, chosen by Core ML, not requested. Every tensor crossing the
+  boundary is converted through a float32 scratch buffer so the decode
+  arithmetic stays where the goldens were computed. On-device detections are
+  therefore not bit-identical to the Python; the export was gated against ONNX
+  at 1.2e-4, which is float16-scale error, but the end-to-end difference on a
+  real frame has not been quantified and would need the camera path first.
+
+Preprocessing is excluded: it is camera plumbing, and folding it in would hide
+the model cost behind vImage.
+
+The export script's op-count extraction returned empty, so the original ANE
+claim was inspection rather than measurement. It is now measured, twice over.
+Xcode's model inspector gives the inventory -- 65 non-const operations in the
+backbone (29 conv, 17 relu, 11 add, 3 nearest + 3 bilinear upsample, 1 concat,
+1 max_pool) and 39 in the head (16 conv, 9 relu, 6 reshape, 4 transpose, 3 add,
+1 stack) -- and the app's Compute tab runs `MLComputePlan` on device, which
+reports **every one of them planned for the Neural Engine**.
+
+State it as *planned* placement, not executed work: `MLComputePlan` reports what
+Core ML intends before anything runs. Executed per-layer timings need
+Instruments' Core ML template, which requires a USB-tethered device and is
+therefore unavailable when the Mac is rented. The 3.9 ms measured end to end is
+consistent with the plan being honoured.
 
 ## Latency budget
 
