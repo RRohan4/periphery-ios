@@ -1,0 +1,125 @@
+{
+  "checkpoint": "/home/rraina/periphery/out/safety40/D0_full/epoch_11.pt",
+  "config": "/home/rraina/periphery/configs/fastbev_cityscapes/D0_safety40_2h_512x256.json",
+  "shapes": {
+    "image": [
+      1,
+      3,
+      256,
+      512
+    ],
+    "features": [
+      1,
+      64,
+      64,
+      128
+    ],
+    "volume": [
+      1,
+      64,
+      41,
+      80,
+      2
+    ]
+  },
+  "note": "CoreML cannot be executed on Linux; conversion success and ONNX numeric agreement are what this proves. Latency and CoreML numerics need a Mac.",
+  "parts": [
+    {
+      "name": "backbone",
+      "params": 15206520,
+      "onnx": {
+        "name": "backbone",
+        "ok": true,
+        "max_abs_diff": 0.0001678466796875,
+        "per_output_diff": [
+          0.00016785
+        ]
+      },
+      "coreml": {
+        "name": "backbone",
+        "ok": false,
+        "error": "TypeError: only 0-dimensional arrays can be converted to Python scalars"
+      }
+    },
+    {
+      "name": "backbone_static",
+      "params": 15206520,
+      "onnx": {
+        "name": "backbone_static",
+        "ok": true,
+        "max_abs_diff": 0.0001678466796875,
+        "per_output_diff": [
+          0.00016785
+        ]
+      },
+      "coreml": {
+        "name": "backbone_static",
+        "convert_s": 1.1,
+        "ok": true,
+        "path": "out/safety40/coreml/backbone_static.mlpackage",
+        "op_counts": {},
+        "n_ops": 0
+      }
+    },
+    {
+      "name": "head_raw",
+      "params": 3672568,
+      "onnx": {
+        "name": "head_raw",
+        "ok": true,
+        "max_abs_diff": 0.0001220703125,
+        "per_output_diff": [
+          0.00012207,
+          8.46e-06,
+          1.049e-05
+        ]
+      },
+      "coreml": {
+        "name": "head_raw",
+        "ok": false,
+        "error": "TypeError: only 0-dimensional arrays can be converted to Python scalars"
+      }
+    },
+    {
+      "name": "head_static",
+      "params": 3672568,
+      "onnx": {
+        "name": "head_static",
+        "ok": true,
+        "max_abs_diff": 0.0001220703125,
+        "per_output_diff": [
+          0.00012207,
+          8.46e-06,
+          1.049e-05
+        ]
+      },
+      "coreml": {
+        "name": "head_static",
+        "convert_s": 0.6,
+        "ok": true,
+        "path": "out/safety40/coreml/head_static.mlpackage",
+        "op_counts": {},
+        "n_ops": 0
+      }
+    },
+    {
+      "name": "head_full",
+      "params": 3672568,
+      "onnx": {
+        "name": "head_full",
+        "ok": true,
+        "max_abs_diff": 24.6875,
+        "per_output_diff": [
+          9e-08,
+          24.6875,
+          0.0
+        ]
+      },
+      "coreml": {
+        "name": "head_full",
+        "ok": false,
+        "error": "TypeError: only 0-dimensional arrays can be converted to Python scalars"
+      }
+    }
+  ]
+}

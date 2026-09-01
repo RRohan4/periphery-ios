@@ -1,0 +1,106 @@
+# periphery-ios
+
+iOS deployment of **Safety40**, a monocular BEV vehicle detector that runs on a
+windshield-mounted phone.
+
+This repository is deliberately small. The training code, datasets and
+evaluation harness live in the `periphery` repo and have no business on a
+rented Mac. What is here is the compiled model, the contract the Swift side has
+to honour, and nothing else.
+
+## What is in here
+
+```
+models/backbone_static.mlpackage    23 MB, 15.21 M params
+models/head_static.mlpackage        7.1 MB,  3.67 M params
+models/coreml_export_report.json    conversion + ONNX numeric agreement
+docs/decode-contract.md             the exact handoff the Swift port must match
+```
+
+## The shape of the thing
+
+The model is split in two, and the split is the whole reason this is portable:
+
+```
+image  [1,3,256,512]
+   |  backbone_static.mlpackage
+features [1,64,64,128]
+   |  native gather through a calibration LUT   <-- Swift, not CoreML
+volume [1,64,41,80,2]
+   |  head_static.mlpackage
+classes / boxes / directions
+   |  decode + threshold + circular NMS         <-- Swift, not CoreML
+detections in vehicle coordinates
+```
+
+The geometry step in the middle is an index gather, not learned. It never
+enters the converted graph, which is why both halves are plain convolution
+stacks that convert without complaint. It is also cheap: measured at 0.3-0.5 ms
+on desktop, because it is a memory copy.
+
+Decode stays in Swift for a measured reason, not a stylistic one. An export
+with decode, argmax and top-k baked in (`head_full`) disagreed with PyTorch by
+**24.7 max abs** — top-k tie-breaking is not portable across runtimes. The two
+shipped halves agree to 1.7e-4 and 1.2e-4.
+
+## Status
+
+| | |
+|---|---|
+| CoreML conversion | passes, both halves, iOS 17 target |
+| ONNX numeric agreement | 1.7e-4 backbone, 1.2e-4 head |
+| ANE residency | **unverified** — see below |
+| On-device latency | **unmeasured** — needs the phone |
+| Sustained / thermal FPS | **unmeasured** |
+
+Nothing on this page has been run on an iPhone yet. Conversion succeeding on
+Linux is the only claim currently supported.
+
+The op inventory looked entirely ANE-native by inspection (conv, relu, add,
+upsample, max_pool, concat, reshape, transpose, stack), but the op-count
+extraction in the export script returned empty, so treat that as an
+expectation rather than a result. **Verify it on device with `MLComputePlan`**
+(iOS 17+), which reports the planned compute unit per operation. That is the
+substitute for Instruments' Core ML template, which needs a USB-tethered
+device and is therefore unavailable when building on a cloud Mac.
+
+## Latency budget
+
+Desktop reference, batch 1:
+
+| | backbone | gather | head | total |
+|---|---|---|---|---|
+| CUDA | 5.1 ms | 0.5 ms | 2.0 ms | **7.6 ms** |
+| CPU | 33.7 ms | 0.3 ms | 24.8 ms | **58.8 ms** |
+
+The CPU column is the conservative floor for the phone. If the ANE engages,
+expect substantially better; if the measured number lands near 58.8 ms,
+something fell off the ANE and `MLComputePlan` will say what.
+
+## Building
+
+Requires Xcode with an iOS 17 SDK or newer (Xcode 15+; Xcode 26 is the last
+version that runs on Intel Macs). Drag both `.mlpackage` directories into the
+Xcode project and let it generate the Swift interfaces.
+
+## Where the truth lives
+
+Constants are **not** transcribed into this README, on purpose — a copied
+constant that drifts is worse than no constant. The Swift port must be written
+against these files in the `periphery` repo:
+
+| what | file |
+|---|---|
+| image normalisation | `periphery/perception/fastbev.py` (MEAN, STD) |
+| projection LUT | `periphery/training/model.py` (`_projection_lut`, `backproject`) |
+| decode + NMS | `periphery/perception/portable_postprocess.py` |
+| mount calibration | `periphery/sources/comma2k19.py` (`mount_pitch`, `sensor_T_vehicle`) |
+| architecture contract | `configs/fastbev_cityscapes/D0_safety40_2h_512x256.json` |
+
+`docs/decode-contract.md` records the handoff precisely.
+
+## Checkpoint
+
+`safety40-locked-v1` — `out/safety40/D0_full/epoch_11.pt`. Holdout F1 0.662 at
+score threshold 0.50, 2.0 m circular NMS, 555 frames. Do not re-export from a
+different checkpoint without updating this line.
