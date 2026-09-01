@@ -11,6 +11,7 @@
 //              simulator (no Neural Engine); run it on the phone.
 //  Latency     the number the port exists for: per-frame cost of backbone,
 //              gather, head and decode, and whether it survives ten minutes.
+//  Live        the whole pipeline on camera frames, with a bird's-eye overlay.
 //
 
 import SwiftUI
@@ -18,6 +19,8 @@ import SwiftUI
 struct ContentView: View {
     var body: some View {
         TabView {
+            LiveView()
+                .tabItem { Label("Live", systemImage: "car.side") }
             SelfCheckView()
                 .tabItem { Label("Self-check", systemImage: "checkmark.seal") }
             ComputePlanView()
