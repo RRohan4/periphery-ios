@@ -51,6 +51,8 @@ struct BenchmarkReport {
     var availableMemoryMB: Double = 0
     /// What precision Core ML actually used for the tensors crossing its edge.
     var precision: String = ""
+    /// nil when the run was flat out; otherwise the frame rate it was held to.
+    var targetFPS: Double?
 
     var summary: String {
         String(format: """
@@ -59,7 +61,7 @@ struct BenchmarkReport {
             total median %.1f ms, p95 %.1f ms, worst %.1f ms
             thermal %@ -> %@%@
             %.0f MB available, low power %@
-            tensors: %@
+            tensors: %@ | %@
             """,
             frames, wallClock, fps,
             backboneMedian * 1000, gatherMedian * 1000,
@@ -69,7 +71,9 @@ struct BenchmarkReport {
             thermalTransitions.isEmpty ? "" : " (" + thermalTransitions.joined(separator: ", ") + ")",
             availableMemoryMB,
             lowPowerMode ? "ON" : "off",
-            precision)
+            precision,
+            targetFPS.map { String(format: "paced to %.0f fps, duty cycle %.0f%%",
+                                   $0, totalMedian * $0 * 100) } ?? "flat out")
     }
 }
 
@@ -115,12 +119,19 @@ enum Benchmark {
     /// sustained run does not look like a hang.
     static func run(frames: Int,
                     warmup: Int = 10,
+                    targetFPS: Double? = nil,
                     progress: ((Int, Int) -> Void)? = nil) throws -> BenchmarkReport {
         let detector = try Detector(calibration: referenceCalibration())
         let input = try syntheticInput()
 
         for _ in 0..<warmup {
-            _ = try detector.detect(image: input)
+            // Core ML hands back autoreleased tensors. Without a pool drained
+            // every iteration they accumulate until the loop ends, and a long
+            // run is killed by jetsam long before it finishes -- which is
+            // exactly what an 18,000-frame run did.
+            try autoreleasepool {
+                _ = try detector.detect(image: input)
+            }
         }
 
         var samples = [LatencySample]()
@@ -130,15 +141,26 @@ enum Benchmark {
         report.startThermal = describe(ProcessInfo.processInfo.thermalState)
         var lastThermal = ProcessInfo.processInfo.thermalState
 
+        let interval = targetFPS.map { 1.0 / $0 }
         let start = DispatchTime.now()
         for frame in 0..<frames {
-            let found = try detector.detect(image: input)
-            detections += found.count
+            let frameStart = DispatchTime.now()
+            try autoreleasepool {
+                let found = try detector.detect(image: input)
+                detections += found.count
+            }
             let timing = detector.lastTiming
             samples.append(LatencySample(backbone: timing.backbone,
                                          gather: timing.gather,
                                          head: timing.head,
                                          decode: timing.decode))
+            // Paced runs model the real duty cycle: a camera delivers a frame
+            // every 33 ms whatever the phone could manage flat out, and duty
+            // cycle is what thermal throttling actually responds to.
+            if let interval {
+                let spent = seconds(since: frameStart)
+                if spent < interval { Thread.sleep(forTimeInterval: interval - spent) }
+            }
             let thermal = ProcessInfo.processInfo.thermalState
             if thermal != lastThermal {
                 let elapsed = seconds(since: start)
@@ -165,6 +187,7 @@ enum Benchmark {
         report.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         report.availableMemoryMB = Double(os_proc_available_memory()) / 1_048_576.0
         report.precision = detector.precisionNote
+        report.targetFPS = targetFPS
         return report
     }
 

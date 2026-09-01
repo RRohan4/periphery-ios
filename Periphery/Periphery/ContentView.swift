@@ -209,7 +209,10 @@ struct BenchmarkView: View {
             List {
                 Section {
                     Button("Burst — \(burst) frames") { start(frames: burst) }
-                    Button("Sustained — 10 min at 30 fps") { start(frames: sustained) }
+                    Button("Sustained — 10 min at 30 fps") {
+                        start(frames: sustained, targetFPS: 30)
+                    }
+                    Button("Saturated — 2000 frames flat out") { start(frames: 2000) }
                 }
                 .disabled(running)
 
@@ -271,7 +274,7 @@ struct BenchmarkView: View {
         String(format: "%.1f ms", seconds * 1000)
     }
 
-    private func start(frames: Int) {
+    private func start(frames: Int, targetFPS: Double? = nil) {
         running = true
         error = nil
         report = nil
@@ -283,7 +286,8 @@ struct BenchmarkView: View {
         // the watchdog would kill the app.
         Task.detached(priority: .userInitiated) {
             do {
-                let outcome = try Benchmark.run(frames: frames) { done, total in
+                let outcome = try Benchmark.run(frames: frames,
+                                                targetFPS: targetFPS) { done, total in
                     if done % 20 == 0 || done == total {
                         Task { @MainActor in
                             progress = "\(done) / \(total)"
