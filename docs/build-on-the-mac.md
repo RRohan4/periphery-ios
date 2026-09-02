@@ -1,7 +1,13 @@
 # Building on the rented Mac
 
 The whole loop: pull, build, drop an `.ipa` on the Desktop, upload it to Drive,
-install it on the phone. Copy-paste from top to bottom.
+install it on the phone.
+
+**The short version, from anywhere inside the repo on the Mac:**
+
+```bash
+./tools/build-ipa.sh
+```
 
 Everything here runs **on the Mac**, not on the Linux box. The Linux box has no
 Xcode, so it can compile nothing in this repo — it only edits and pushes.
@@ -16,14 +22,22 @@ it if you have already done it on this instance.
 ```bash
 xcode-select --install 2>/dev/null   # command line tools, if missing
 sudo xcodebuild -license accept
-git clone https://github.com/RRohan4/periphery-ios.git ~/periphery-ios
+git clone https://github.com/RRohan4/periphery-ios.git
+cd periphery-ios
 ```
 
-Then open the project **once** in Xcode so signing initialises:
+Then open the project **once** in Xcode so the scheme is generated:
 
 ```bash
-open ~/periphery-ios/Periphery/Periphery.xcodeproj
+open Periphery/Periphery.xcodeproj
 ```
+
+> **Do not trust `~` on a rented Mac.** On one of these the prompt said
+> `Renuka.Raina@...` while `$HOME` was `/Users/u`, so every `~/...` path in a
+> pasted command pointed at a directory that did not exist. That is why the
+> build is a script that works out its own paths rather than a command you
+> paste. If you ever need to know where you actually are:
+> `echo "$HOME"; pwd`.
 
 Xcode → Signing & Capabilities → make sure the team is `6AU6S9Z86T` and
 "Automatically manage signing" is ticked. You only need this for a *signed*
@@ -31,102 +45,61 @@ build; the unsigned `.ipa` path below does not care.
 
 ---
 
-## 1. Pull
+## 1. Pull, build, package — one command
+
+From **anywhere inside the repo**:
 
 ```bash
-cd ~/periphery-ios
-git pull origin main
+./tools/build-ipa.sh
 ```
 
-If the pull touched `project.pbxproj` and Xcode is open, close and reopen it.
-Xcode caches the project file and will otherwise build the old target list.
+That is the whole loop. It pulls `main`, builds Release for device unsigned,
+wraps the app into an `.ipa`, and leaves it on the Desktop. It prints where it
+put it.
 
----
+It works out the repo root from git and the Desktop from `$HOME`, falling back
+to the repo if there is no Desktop, so it does not care where the repo was
+cloned or what the rented Mac calls your home directory.
 
-## 2. Build
+Two flags:
+
+```bash
+./tools/build-ipa.sh --check      # compile only, no .ipa — fastest error signal
+./tools/build-ipa.sh --no-pull    # build what is on disk, do not touch git
+```
+
+`--check` is the one to reach for when you expect compile errors: it skips
+packaging and stops at the first failure.
 
 The project uses a **file-system synchronized group**, so new `.swift` files are
 picked up automatically. Nothing needs adding to the target.
 
-### 2a. Just check it compiles
-
-Fastest signal, no signing, no device:
-
-```bash
-cd ~/periphery-ios/Periphery
-xcodebuild -project Periphery.xcodeproj -scheme Periphery \
-           -destination 'generic/platform=iOS' \
-           -configuration Release \
-           CODE_SIGNING_ALLOWED=NO \
-           build 2>&1 | grep -E "error:|warning:|BUILD"
-```
-
-Expect `** BUILD SUCCEEDED **`. Errors print with a file and line.
-
-### 2b. Build the thing you actually install
-
-```bash
-cd ~/periphery-ios/Periphery
-rm -rf ~/build
-xcodebuild -project Periphery.xcodeproj -scheme Periphery \
-           -destination 'generic/platform=iOS' \
-           -configuration Release \
-           -derivedDataPath ~/build \
-           CODE_SIGNING_ALLOWED=NO \
-           build
-```
-
-The app lands at:
-
-```
-~/build/Build/Products/Release-iphoneos/Periphery.app
-```
-
----
-
-## 3. Wrap it into an `.ipa` on the Desktop
+### What it does, if you would rather run it by hand
 
 An `.ipa` is a zip with the app inside a folder called `Payload`. That is the
 entire format — there is nothing else to it.
 
 ```bash
-cd ~/build/Build/Products/Release-iphoneos
-rm -rf ~/Desktop/Payload ~/Desktop/Periphery.ipa
-mkdir -p ~/Desktop/Payload
-cp -R Periphery.app ~/Desktop/Payload/
-cd ~/Desktop
-zip -qry Periphery.ipa Payload
-rm -rf Payload
-ls -lh ~/Desktop/Periphery.ipa
-```
-
-`Periphery.ipa` is now sitting on the Desktop, ready to drag into Google Drive
-in the browser.
-
-### Or, all four steps in one
-
-```bash
-cd ~/periphery-ios && git pull origin main \
-&& cd Periphery \
-&& rm -rf ~/build \
-&& xcodebuild -project Periphery.xcodeproj -scheme Periphery \
-              -destination 'generic/platform=iOS' -configuration Release \
-              -derivedDataPath ~/build CODE_SIGNING_ALLOWED=NO build \
-&& rm -rf ~/Desktop/Payload ~/Desktop/Periphery.ipa \
-&& mkdir -p ~/Desktop/Payload \
-&& cp -R ~/build/Build/Products/Release-iphoneos/Periphery.app ~/Desktop/Payload/ \
-&& (cd ~/Desktop && zip -qry Periphery.ipa Payload && rm -rf Payload) \
-&& echo "READY: ~/Desktop/Periphery.ipa" && ls -lh ~/Desktop/Periphery.ipa
+REPO="$(git rev-parse --show-toplevel)"
+git -C "$REPO" pull origin main
+rm -rf "$REPO/.build"
+xcodebuild -project "$REPO/Periphery/Periphery.xcodeproj" -scheme Periphery \
+           -destination 'generic/platform=iOS' -configuration Release \
+           -derivedDataPath "$REPO/.build" CODE_SIGNING_ALLOWED=NO build
+mkdir -p /tmp/Payload
+cp -R "$REPO/.build/Build/Products/Release-iphoneos/Periphery.app" /tmp/Payload/
+( cd /tmp && zip -qry "$HOME/Desktop/Periphery.ipa" Payload && rm -rf Payload )
+ls -lh "$HOME/Desktop/Periphery.ipa"
 ```
 
 ---
 
-## 4. Onto the phone
+## 2. Onto the phone
 
 The `.ipa` above is **unsigned**, which is what Sideloadly and AltStore want —
 they re-sign it with your own Apple ID on the way in.
 
-1. Drag `~/Desktop/Periphery.ipa` into Google Drive in the browser.
+1. Drag `Periphery.ipa` off the Desktop into Google Drive in the browser.
 2. On the machine with your phone plugged in, download it.
 3. Sideloadly (or AltStore) → pick the `.ipa` → your Apple ID → Start.
 4. On the phone: Settings → General → VPN & Device Management → trust the
@@ -137,10 +110,10 @@ A free Apple ID signature **expires after 7 days**. Re-sideloading the same
 
 ### The direct route, if the phone is plugged into the Mac
 
-Skip all of section 3 and 4:
+Skip section 1 and 2 entirely:
 
 ```bash
-open ~/periphery-ios/Periphery/Periphery.xcodeproj
+open "$(git rev-parse --show-toplevel)/Periphery/Periphery.xcodeproj"
 ```
 
 Select the phone as the destination, press ⌘R. Xcode signs and installs it.
@@ -148,7 +121,7 @@ This is faster, and the only way to get a debugger and console logs.
 
 ---
 
-## 5. Check it actually works, in this order
+## 3. Check it actually works, in this order
 
 Do these before driving anywhere. Each one fails loudly and cheaply.
 
@@ -193,21 +166,23 @@ retry.
 You left out `CODE_SIGNING_ALLOWED=NO`. Add it back — the sideload path signs
 later, not here.
 
+**`cd: no such file or directory: /Users/u/...`**
+`~` is not your home on this machine. Do not paste paths with `~` in them; run
+`./tools/build-ipa.sh` from inside the repo, which derives its own.
+
 **Build succeeds but the new tab is missing**
 Xcode is holding a stale `project.pbxproj`. Quit Xcode, then:
 ```bash
-rm -rf ~/build ~/Library/Developer/Xcode/DerivedData/Periphery-*
+rm -rf "$(git rev-parse --show-toplevel)/.build" \
+       "$HOME/Library/Developer/Xcode/DerivedData/Periphery-"*
 ```
 and build again.
 
-**`No such file or directory: Periphery.app`**
-The build failed further up but the shell kept going. Re-run section 2a on its
-own and read the errors.
-
 **App installs, then crashes at launch**
-Almost always the models. Confirm both `.mlpackage`s made it into the bundle:
+Almost always the models. The script warns if they are missing; to check by
+hand:
 ```bash
-ls ~/build/Build/Products/Release-iphoneos/Periphery.app/*.mlmodelc
+ls "$(git rev-parse --show-toplevel)/.build/Build/Products/Release-iphoneos/Periphery.app/"*.mlmodelc
 ```
 Expect `backbone_static.mlmodelc` and `head_static.mlmodelc`.
 
