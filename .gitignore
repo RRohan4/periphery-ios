@@ -22,3 +22,8 @@ Carthage/Build/
 
 # macOS
 .DS_Store
+
+# Benchmark and export scratch. Large, regenerable, and one .onnx in here is
+# 168 MB -- past GitHub's hard limit, which is how this got noticed.
+out/
+:memory:.ses
