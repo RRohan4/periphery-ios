@@ -9,27 +9,9 @@
 //  2. Intrinsic matrix delivery ON. The crop that lands on the trained focal is
 //     computed from the live K, not guessed.
 //
-//  FOCUS. Autofocus moves the lens, which moves the focal length, which
-//  silently rescales every range estimate. So the lens must not wander during a
-//  drive. That much was right.
-//
-//  What was wrong was the number. This used to hard-code
-//  `setFocusModeLocked(lensPosition: 1.0)` with the comment "1.0 is the far end
-//  of the lens range". It is -- but the far MECHANICAL end is not the same as
-//  infinity FOCUS. Voice-coil actuators are built with overtravel past infinity
-//  so that infinity stays reachable across temperature and unit-to-unit spread,
-//  so parking at 1.0 lands past focus and everything distant goes soft. There is
-//  no portable constant for infinity: it is a different number on every unit.
-//
-//  A blurry frame is not a cosmetic problem here. Optical flow is differences of
-//  local intensity, and blur is a low-pass filter -- it removes exactly the
-//  high-frequency content the flow field is computed from. Soft focus degrades
-//  the pitch estimator far more than it degrades the detector.
-//
-//  So focus is now FOUND rather than guessed: autofocus, restricted to the far
-//  range, until someone locks it. `Calibration` shows the lens position and
-//  whether it is locked, because an unlocked lens is a real caveat on every
-//  range and must not be silent.
+//  Focus is locked at infinity as well. Autofocus moves the lens, which moves
+//  the focal length, which silently rescales every range estimate -- the same
+//  failure mode as feeding the wrong focal in the first place.
 
 import AVFoundation
 import CoreMedia
@@ -69,21 +51,9 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    /// Where the lens sits, and whether it is allowed to move.
-    ///
-    /// `autoFar` is the honest default: the correct lens position for infinity
-    /// is device-specific and cannot be hard-coded, so let the camera find it.
-    /// `locked` is what a measured drive wants, at a position someone chose by
-    /// looking at the picture.
-    enum FocusPolicy: Equatable {
-        case autoFar
-        case locked(Float)
-    }
-
     let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "com.periphery.camera", qos: .userInitiated)
-    private var device: AVCaptureDevice?
 
     /// Called on the capture queue, not the main thread.
     var onFrame: ((Frame) -> Void)?
@@ -107,7 +77,6 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                                                    for: .video, position: .back) else {
             throw CameraError.noCamera
         }
-        self.device = device
         let input = try AVCaptureDeviceInput(device: device)
         guard session.canAddInput(input) else { throw CameraError.cannotAdd("camera input") }
         session.addInput(input)
@@ -134,84 +103,14 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
 
         try? device.lockForConfiguration()
+        if device.isFocusModeSupported(.locked) {
+            // 1.0 is the far end of the lens range.
+            device.setFocusModeLocked(lensPosition: 1.0)
+        }
         if device.isExposureModeSupported(.continuousAutoExposure) {
             device.exposureMode = .continuousAutoExposure
         }
         device.unlockForConfiguration()
-
-        apply(FocusPolicy.load())
-    }
-
-    // MARK: - Focus
-
-    /// Where the lens is now, 0 (closest) to 1 (mechanically furthest).
-    var lensPosition: Float { device?.lensPosition ?? 0 }
-    var focusIsLocked: Bool { device?.focusMode == .locked }
-    /// True while the camera is still hunting; a frame captured now may be soft.
-    var isAdjustingFocus: Bool { device?.isAdjustingFocus ?? false }
-
-    private(set) var focusPolicy: FocusPolicy = .autoFar
-
-    func apply(_ policy: FocusPolicy) {
-        guard let device, (try? device.lockForConfiguration()) != nil else { return }
-        defer { device.unlockForConfiguration() }
-        switch policy {
-        case .autoFar:
-            // Restricting the range keeps the camera from racking to macro on
-            // the dashboard or a raindrop on the glass, which is the failure
-            // this restriction exists for.
-            if device.isAutoFocusRangeRestrictionSupported {
-                device.autoFocusRangeRestriction = .far
-            }
-            if device.isFocusModeSupported(.continuousAutoFocus) {
-                device.focusMode = .continuousAutoFocus
-            }
-        case .locked(let position):
-            guard device.isFocusModeSupported(.locked) else { return }
-            device.setFocusModeLocked(lensPosition: min(max(position, 0), 1))
-        }
-        focusPolicy = policy
-        policy.save()
-    }
-
-    /// Freeze the lens exactly where autofocus has just put it.
-    ///
-    /// This is the whole point: the right lens position for infinity is a
-    /// property of the individual camera, so the only reliable way to get it is
-    /// to let autofocus find it on a distant scene and then stop the lens
-    /// moving. `currentLensPosition` is Apple's sentinel for "lock here",
-    /// which avoids a read-then-write race against a lens still in motion.
-    @discardableResult
-    func lockFocusHere() -> Float {
-        guard let device, (try? device.lockForConfiguration()) != nil else { return 0 }
-        defer { device.unlockForConfiguration() }
-        guard device.isFocusModeSupported(.locked) else { return device.lensPosition }
-        device.setFocusModeLocked(lensPosition: AVCaptureDevice.currentLensPosition)
-        let position = device.lensPosition
-        focusPolicy = .locked(position)
-        focusPolicy.save()
-        return position
-    }
-}
-
-// MARK: - Persistence
-
-extension CameraSession.FocusPolicy {
-    private static let key = "CameraSession.FocusPolicy.v1"
-
-    /// A locked position belongs to one physical phone, so it survives a
-    /// restart. It does NOT survive a reset, and it should not: a value carried
-    /// over from another unit would be worse than none.
-    static func load(from defaults: UserDefaults = .standard) -> Self {
-        guard let value = defaults.object(forKey: key) as? Double else { return .autoFar }
-        return .locked(Float(value))
-    }
-
-    func save(to defaults: UserDefaults = .standard) {
-        switch self {
-        case .autoFar: defaults.removeObject(forKey: Self.key)
-        case .locked(let position): defaults.set(Double(position), forKey: Self.key)
-        }
     }
 
     func start() {
