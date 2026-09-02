@@ -34,6 +34,7 @@
 //  on the way in (Gates.handheld.writesToPose is false). The mount pitch comes
 //  from the driving profile, in a car, or from the Calibrate tab.
 
+import Combine
 import SwiftUI
 import simd
 
