@@ -201,6 +201,14 @@ final class FocusOfExpansion: @unchecked Sendable {
         /// point of the tab -- a moving car shows up as a coherent patch of
         /// outliers, without anything having recognised it as a car.
         var inlier: [Bool] = []
+        /// The window median focus, in the same pixels as `foe`.
+        ///
+        /// Drawn alongside the per-pair one because the difference between them
+        /// IS the story: a single pair scatters by ~0.6 deg (measured on
+        /// comma2k19, and the same in every flow method tried), while the median
+        /// over the window lands inside 0.1 deg. Showing only the jumping cross
+        /// makes a working estimator look broken.
+        var medianFoe: SIMD2<Double>?
         /// This pair alone, not the window median.
         var pitchDegrees: Double = 0
         var yawDegrees: Double = 0
@@ -263,6 +271,7 @@ final class FocusOfExpansion: @unchecked Sendable {
     /// interval. 100 Hz for a couple of seconds.
     private var gyro = [(t: Double, w: SIMD3<Double>)]()
 
+    private var foeWindow = [SIMD2<Double>]()
     private var pitchWindow = [Double]()
     private var yawWindow = [Double]()
     private var rawWindow = [Double]()          // no de-rotation, diagnostic only
@@ -283,6 +292,7 @@ final class FocusOfExpansion: @unchecked Sendable {
     func reset() {
         queue.async {
             self.previous = nil
+            self.foeWindow.removeAll()
             self.pitchWindow.removeAll()
             self.yawWindow.removeAll()
             self.rawWindow.removeAll()
@@ -411,12 +421,14 @@ final class FocusOfExpansion: @unchecked Sendable {
 
         let angles = pitchAndYaw(foe: fit.foe, roll: roll)
         record(accepted: true)
-        append(pitch: angles.pitch, yaw: angles.yaw,
+        append(foe: fit.foe, pitch: angles.pitch, yaw: angles.yaw,
                raw: rawFit.map { pitchAndYaw(foe: $0.foe, roll: roll).pitch },
                inliers: fit.inliers)
+        let median = medianFoe()
         emitDebug {
             $0.width = flowWidth; $0.height = flowHeight
             $0.foe = fit.foe
+            $0.medianFoe = median
             $0.pitchDegrees = angles.pitch * 180.0 / .pi
             $0.yawDegrees = angles.yaw * 180.0 / .pi
             $0.inliers = fit.inliers
@@ -673,7 +685,9 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - The window
 
-    private func append(pitch: Double, yaw: Double, raw: Double?, inliers: Int) {
+    private func append(foe: SIMD2<Double>, pitch: Double, yaw: Double,
+                        raw: Double?, inliers: Int) {
+        foeWindow.append(foe)
         pitchWindow.append(pitch * 180.0 / .pi)
         yawWindow.append(yaw * 180.0 / .pi)
         rawWindow.append((raw ?? pitch) * 180.0 / .pi)
@@ -681,12 +695,21 @@ final class FocusOfExpansion: @unchecked Sendable {
         let windowSize = gates.windowSize
         if pitchWindow.count > windowSize {
             let excess = pitchWindow.count - windowSize
+            foeWindow.removeFirst(excess)
             pitchWindow.removeFirst(excess)
             yawWindow.removeFirst(excess)
             rawWindow.removeFirst(excess)
             inlierWindow.removeFirst(excess)
         }
         publish(gate: "")
+    }
+
+    /// Component-wise median, which is enough for a crosshair and cannot be
+    /// dragged off by one bad fit the way a mean can.
+    private func medianFoe() -> SIMD2<Double>? {
+        guard !foeWindow.isEmpty else { return nil }
+        return SIMD2<Double>(Self.median(foeWindow.map(\.x)),
+                             Self.median(foeWindow.map(\.y)))
     }
 
     private func record(accepted: Bool) {
