@@ -70,11 +70,20 @@ struct LiveView: View {
             Text(String(format: "%.1f fps · preprocess %.1f ms · inference %.1f ms · %d boxes",
                         snapshot.fps, snapshot.preprocessMS, snapshot.inferenceMS,
                         snapshot.detections.count))
-            Text(String(format: "pitch %.2f deg (gravity) · focal %.1f px · crop %@",
-                        snapshot.pitchDegrees, snapshot.focal, snapshot.cropDescription))
+            Text(String(format: "pitch %+.2f (%@) · roll %+.2f (%@) · yaw %@",
+                        snapshot.pose.pitchDegrees, snapshot.pose.pitchFrom.label,
+                        snapshot.measuredRollDegrees, snapshot.pose.rollFrom.label,
+                        snapshot.measuredYawDegrees.map { String(format: "%+.2f", $0) } ?? "--"))
+            Text(String(format: "focal %.1f px · crop %@ · %@ · %@",
+                        snapshot.focal, snapshot.cropDescription,
+                        snapshot.speed >= 0 ? String(format: "%.1f m/s", snapshot.speed) : "no fix",
+                        snapshot.relativeAltitude.map { String(format: "%+.2f m baro", $0) } ?? "no baro"))
             Text("thermal \(snapshot.thermal) · dropped \(snapshot.dropped)"
                  + (snapshot.note.isEmpty ? "" : " · \(snapshot.note)"))
                 .foregroundStyle(snapshot.note.isEmpty ? Color.secondary : Color.red)
+            if !snapshot.mountWarning.isEmpty {
+                Text(snapshot.mountWarning).foregroundStyle(Color.orange)
+            }
         }
         .font(.system(size: 11, design: .monospaced))
         .frame(maxWidth: .infinity, alignment: .leading)
