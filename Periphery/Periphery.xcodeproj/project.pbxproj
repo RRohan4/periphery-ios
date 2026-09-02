@@ -257,6 +257,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Periphery uses the rear camera to detect vehicles ahead. Video never leaves the phone.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Periphery uses speed and course to measure the camera's mount angle while you drive. Location never leaves the phone.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Periphery uses the motion sensors and the barometer to measure the camera's mount angle and the road grade.";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -304,6 +306,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Periphery uses the rear camera to detect vehicles ahead. Video never leaves the phone.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Periphery uses speed and course to measure the camera's mount angle while you drive. Location never leaves the phone.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Periphery uses the motion sensors and the barometer to measure the camera's mount angle and the road grade.";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

@@ -27,6 +27,14 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let intrinsics: simd_double3x3?
         let width: Int
         let height: Int
+        /// The buffer itself, kept so the recorder can hand it to an
+        /// AVAssetWriter without a second capture path.
+        let sampleBuffer: CMSampleBuffer
+        /// Host time clock -- the same mach_absolute_time domain CoreMotion and
+        /// CMAltimeter stamp their samples in, so video, IMU and barometer share
+        /// a timeline with no conversion. CoreLocation does not; see
+        /// MotionSource's clock anchor.
+        let presentationTime: CMTime
     }
 
     enum CameraError: Error, CustomStringConvertible {
@@ -126,7 +134,9 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         onFrame?(Frame(pixelBuffer: pixelBuffer,
                        intrinsics: Self.intrinsics(from: sampleBuffer),
                        width: CVPixelBufferGetWidth(pixelBuffer),
-                       height: CVPixelBufferGetHeight(pixelBuffer)))
+                       height: CVPixelBufferGetHeight(pixelBuffer),
+                       sampleBuffer: sampleBuffer,
+                       presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
     }
 
     /// The per-frame intrinsic matrix AVFoundation attaches when delivery is
