@@ -49,6 +49,10 @@ final class FramePipeline: @unchecked Sendable {
         /// False when the frame is too narrow to reach the trained focal, in
         /// which case every range carries a scale error that must be stated.
         var focalMatched = true
+        /// Horizon and ground-distance lines in source pixels, for the overlay
+        /// on the camera preview. Computed here because this is where the
+        /// calibration lives.
+        var guides = GroundGuides()
     }
 
     private let camera = CameraSession()
@@ -274,6 +278,7 @@ final class FramePipeline: @unchecked Sendable {
             snapshot.focal = calibration.achievedFocal(crop)
             snapshot.focalMatched = calibration.focalIsMatched(crop)
             snapshot.visibleFraction = detector?.visibleVoxelFraction ?? 0
+            snapshot.guides = calibration.groundGuides()
             snapshot.cropDescription = "\(crop.width)x\(crop.height) at (\(crop.x), \(crop.y))"
 
             guard let preprocessor, let detector else { return }

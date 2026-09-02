@@ -32,6 +32,20 @@ struct ImageCrop {
     var offsetY: Int { (Contract.inputHeight - scaledHeight) / 2 }
 }
 
+/// Horizon and ground-distance lines in SOURCE FRAME pixels, ready to be laid
+/// over the camera preview.
+struct GroundGuides: Sendable {
+    struct Segment: Sendable {
+        var range: Double
+        var a: SIMD2<Double>
+        var b: SIMD2<Double>
+    }
+    var horizon: Segment?
+    var ranges: [Segment] = []
+    var frameWidth = 0
+    var frameHeight = 0
+}
+
 struct Calibration {
 
     /// Where the camera is and which way it points.
@@ -171,6 +185,59 @@ struct Calibration {
         let adjusted = adjustedIntrinsics(for: crop)
         let projected = adjusted * image
         return SIMD2<Double>(projected.x / projected.z, projected.y / projected.z)
+    }
+
+    /// Where a vehicle-frame POINT lands in SOURCE FRAME pixels -- before the
+    /// crop and the letterbox, i.e. the coordinates the camera preview shows.
+    /// Drawing in this space is what lets the horizon be laid over the live
+    /// image rather than over the network canvas.
+    func sourcePoint(_ vehicle: SIMD3<Double>) -> SIMD2<Double>? {
+        let rotation = Self.vehicleToSensor(pitch: pose.pitch, roll: pose.roll, yaw: pose.yaw)
+        let camera = SIMD3<Double>(pose.forwardOfOrigin, 0.0, pose.height)
+        let image = Contract.sensorToImageAxes * (rotation * (vehicle - camera))
+        guard image.z > 1e-6 else { return nil }
+        let projected = K * image
+        return SIMD2<Double>(projected.x / projected.z, projected.y / projected.z)
+    }
+
+    /// The same for a DIRECTION: the point at infinity along it, where
+    /// translation drops out. Two ground directions span the horizon.
+    func sourceVanishingPoint(_ direction: SIMD3<Double>) -> SIMD2<Double>? {
+        let rotation = Self.vehicleToSensor(pitch: pose.pitch, roll: pose.roll, yaw: pose.yaw)
+        let image = Contract.sensorToImageAxes * (rotation * direction)
+        guard image.z > 1e-9 else { return nil }
+        let projected = K * image
+        return SIMD2<Double>(projected.x / projected.z, projected.y / projected.z)
+    }
+
+    /// The horizon and a ladder of ground-distance lines, in source pixels.
+    ///
+    /// This is the cheapest honest check on the whole pose. A pitch error of
+    /// half a degree reads 40 m as 56 m and is invisible in a number; the same
+    /// error puts the drawn horizon visibly off the road. Roll tips the line,
+    /// yaw slides the vanishing point sideways.
+    func groundGuides(ranges: [Double] = [10, 20, 30, 40],
+                      halfWidth: Double = 6.0) -> GroundGuides {
+        var guides = GroundGuides(frameWidth: frameWidth, frameHeight: frameHeight)
+        if let forward = sourceVanishingPoint(SIMD3<Double>(1.0, 0.0, 0.0)),
+           let left = sourceVanishingPoint(SIMD3<Double>(0.0, 1.0, 0.0)) {
+            // Two vanishing points define the line; extend it across the frame.
+            let direction = left - forward
+            let length = (direction.x * direction.x + direction.y * direction.y).squareRoot()
+            if length > 1e-6 {
+                let unit = direction / length
+                let reach = Double(frameWidth) * 2.0
+                guides.horizon = GroundGuides.Segment(range: 0,
+                                                      a: forward - unit * reach,
+                                                      b: forward + unit * reach)
+            }
+        }
+        for r in ranges {
+            guard let a = sourcePoint(SIMD3<Double>(r, halfWidth, 0)),
+                  let b = sourcePoint(SIMD3<Double>(r, -halfWidth, 0)) else { continue }
+            guides.ranges.append(GroundGuides.Segment(range: r, a: a, b: b))
+        }
+        return guides
     }
 
     // MARK: - Focal matching
