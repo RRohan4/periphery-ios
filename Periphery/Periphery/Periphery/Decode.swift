@@ -38,12 +38,16 @@ enum Decode {
     ///
     /// `classes` is [6720, 4] LOGITS, `boxes` is [6720, 9] regression codes,
     /// `directions` is [6720, 2] logits. All contiguous, candidate-major.
+    /// `rejectImplausible` is OFF by default so the golden vectors in
+    /// SelfCheck exercise exactly the decode path that produced the measured
+    /// operating point. The live pipeline turns it on -- see `plausible`.
     static func detections(classes: UnsafePointer<Float>,
                            boxes: UnsafePointer<Float>,
                            directions: UnsafePointer<Float>,
                            anchors: [Contract.Anchor],
                            scoreThreshold: Double = Contract.scoreThreshold,
-                           nmsRadius: Double = Contract.nmsRadius) -> [Detection] {
+                           nmsRadius: Double = Contract.nmsRadius,
+                           rejectImplausible: Bool = false) -> [Detection] {
         var candidates = [Detection]()
         let numClasses = Contract.classNames.count
 
@@ -79,11 +83,46 @@ enum Decode {
                   detection.x <= Contract.forwardRange.max,
                   detection.y >= Contract.lateralRange.min,
                   detection.y <= Contract.lateralRange.max else { continue }
+            // 7. is it shaped like the thing it claims to be?
+            if rejectImplausible, !plausible(detection) { continue }
 
             candidates.append(detection)
         }
 
         return circularNMS(candidates, radius: nmsRadius)
+    }
+
+    /// Is this box a vehicle, or an artefact wearing a vehicle's label?
+    ///
+    /// The box coder exponentiates its size codes, so a confident-looking
+    /// candidate can decode to a two-metre-tall motorcycle or a fourteen-metre
+    /// car. Nothing upstream rejects those: the score says how much the head
+    /// liked the FEATURE, not whether the geometry it emitted is possible.
+    ///
+    /// The bounds are deliberately loose -- wide enough that no real vehicle on
+    /// a road is excluded, tight enough that decode noise is. This removes
+    /// impossible geometry, NOT low-quality detections: the measured operating
+    /// point is P 0.647 at threshold 0.50, and the remaining false positives
+    /// are plausibly-shaped boxes on empty road that only the threshold moves.
+    static func plausible(_ detection: Detection) -> Bool {
+        let bounds: (length: ClosedRange<Double>, width: ClosedRange<Double>,
+                     height: ClosedRange<Double>)
+        switch Contract.classNames[detection.label] {
+        case "large_vehicle": bounds = (4.0...20.0, 1.8...3.2, 1.8...4.5)
+        case "two_wheeler":   bounds = (1.0...3.2, 0.3...1.4, 0.8...2.2)
+        case "pedestrian":    bounds = (0.2...1.2, 0.2...1.2, 1.0...2.2)
+        default:              bounds = (2.5...7.0, 1.3...2.6, 1.0...2.6)
+        }
+        guard bounds.length.contains(detection.length),
+              bounds.width.contains(detection.width),
+              bounds.height.contains(detection.height) else { return false }
+        // A box whose base is far off the road plane is a projection artefact,
+        // not a vehicle. z is the CENTRE, so the base sits at z - h/2.
+        let base = detection.z - detection.height / 2
+        guard base > -1.5, base < 1.5 else { return false }
+        // Wheels-on-ground vehicles are longer than they are wide. A box that
+        // is wider than it is long is a fit to something that is not a vehicle.
+        return detection.length >= detection.width * 0.9
     }
 
     // MARK: - Steps
