@@ -6,6 +6,7 @@
 //  UIFileSharingEnabled and LSSupportsOpeningDocumentsInPlace put the whole
 //  Documents folder in Files and in Finder, so a drive drags out intact.
 
+import Combine
 import SwiftUI
 
 struct RecordView: View {
