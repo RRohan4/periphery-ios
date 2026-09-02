@@ -49,12 +49,6 @@ final class FramePipeline: @unchecked Sendable {
         /// False when the frame is too narrow to reach the trained focal, in
         /// which case every range carries a scale error that must be stated.
         var focalMatched = true
-        /// Lens position 0-1, whether focus is pinned, and whether the camera is
-        /// still hunting. A soft frame costs the flow estimator far more than it
-        /// costs the detector, so this is not a nicety.
-        var lensPosition: Float = 0
-        var focusLocked = false
-        var focusHunting = false
         /// Horizon and ground-distance lines in source pixels, for the overlay
         /// on the camera preview. Computed here because this is where the
         /// calibration lives.
@@ -67,7 +61,7 @@ final class FramePipeline: @unchecked Sendable {
         var scoreThreshold = Contract.scoreThreshold
     }
 
-    let camera = CameraSession()
+    private let camera = CameraSession()
     let motion = MotionSource()
     let recorder = DriveRecorder()
     let foe = FocusOfExpansion()
@@ -360,9 +354,6 @@ final class FramePipeline: @unchecked Sendable {
         snapshot.gravityPitchDegrees = gravityPitch * 180.0 / .pi
         snapshot.foe = estimate
         snapshot.scoreThreshold = scoreThreshold
-        snapshot.lensPosition = camera.lensPosition
-        snapshot.focusLocked = camera.focusIsLocked
-        snapshot.focusHunting = camera.isAdjustingFocus
 
         do {
             let calibration = try calibrate(with: frame)

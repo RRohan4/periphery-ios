@@ -187,14 +187,10 @@ struct LiveView: View {
                         snapshot.measuredRollDegrees,
                         snapshot.pose.yawDegrees, snapshot.pose.yawFrom.label))
             foeLine(snapshot.foe)
-            Text(String(format: "focal %.0f px · lens %.2f %@ · %@ · %@ · drop %d",
-                        snapshot.focal, snapshot.lensPosition,
-                        snapshot.focusHunting ? "hunting"
-                            : (snapshot.focusLocked ? "locked" : "auto"),
+            Text(String(format: "focal %.0f px · %@ · thermal %@ · dropped %d",
+                        snapshot.focal,
                         snapshot.speed >= 0 ? String(format: "%.1f m/s", snapshot.speed) : "no fix",
                         snapshot.thermal, snapshot.dropped))
-                .foregroundStyle(snapshot.focusHunting ? Color.orange
-                                 : Color.white.opacity(0.92))
             if !snapshot.note.isEmpty {
                 Text(snapshot.note).foregroundStyle(Color.red)
             }
