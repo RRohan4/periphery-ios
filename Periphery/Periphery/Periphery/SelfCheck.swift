@@ -42,6 +42,7 @@ struct SelfCheck {
         results.append(checkProjection(calibration, manifest))
         results.append(checkLUT(bundle, calibration, manifest))
         results.append(checkDecode(bundle, manifest))
+        results.append(checkMountAxes(calibration))
         return results
     }
 
@@ -198,6 +199,116 @@ struct SelfCheck {
                             + format(worst))
     }
 
+    /// Roll and yaw have no golden -- the Python rig had neither axis, so
+    /// `sensor_T_vehicle` there is pitch-only and the committed goldens exercise
+    /// the new terms at exactly zero, where they vanish. That is a test that
+    /// passes for the wrong reason.
+    ///
+    /// So this asserts the two things a golden would have caught anyway: that
+    /// the rotation still collapses to the Python's Ry(pitch) at zero roll and
+    /// yaw, and that each axis moves the image the way the physical mount does.
+    /// A flipped sign applies twice the mount angle instead of cancelling it,
+    /// and the failure looks like a bad detector rather than a bad transform.
+    private static func checkMountAxes(_ calibration: Calibration) -> Result {
+        var failures = [String]()
+
+        // 1. Zero roll and yaw must reproduce the Python's Ry(pitch) exactly.
+        let pitch = calibration.pitch
+        let mine = Calibration.vehicleToSensor(pitch: pitch, roll: 0, yaw: 0)
+        let python = simd_double3x3(rows: [
+            SIMD3<Double>(cos(pitch), 0.0, sin(pitch)),
+            SIMD3<Double>(0.0, 1.0, 0.0),
+            SIMD3<Double>(-sin(pitch), 0.0, cos(pitch)),
+        ])
+        var worst = 0.0
+        for column in 0..<3 {
+            for row in 0..<3 {
+                worst = max(worst, abs(mine[column][row] - python[column][row]))
+            }
+        }
+        if worst > geometryTolerance { failures.append("Ry(pitch) diff \(format(worst))") }
+
+        // 2. Every rotation must be orthonormal with determinant +1. A typo in
+        //    a matrix literal shows up here before it shows up as a bad range.
+        let tilted = Calibration.vehicleToSensor(pitch: 0.07, roll: -0.05, yaw: 0.03)
+        let identity = tilted.transpose * tilted
+        var orthoError = 0.0
+        for column in 0..<3 {
+            for row in 0..<3 {
+                orthoError = max(orthoError,
+                                 abs(identity[column][row] - (column == row ? 1.0 : 0.0)))
+            }
+        }
+        if orthoError > 1e-12 { failures.append("not orthonormal, \(format(orthoError))") }
+        if abs(tilted.determinant - 1.0) > 1e-12 {
+            failures.append("det \(format(tilted.determinant)), expected +1")
+        }
+
+        // 3. Each axis, one at a time, against the physical mount. Image axes
+        //    are x right, y down, so "further down the image" is +y.
+        let crop = calibration.focalMatchedCrop()
+        let five = 5.0 * Double.pi / 180.0
+        func imagePoint(_ vehicle: SIMD3<Double>,
+                        pitch: Double, roll: Double, yaw: Double) -> SIMD2<Double>? {
+            var probe = calibration
+            probe.pose.pitch = pitch
+            probe.pose.roll = roll
+            probe.pose.yaw = yaw
+            let rotation = Calibration.vehicleToSensor(pitch: pitch, roll: roll, yaw: yaw)
+            let camera = SIMD3<Double>(probe.forwardOfOrigin, 0.0, probe.height)
+            let sensor = rotation * (vehicle - camera)
+            let image = Contract.sensorToImageAxes * sensor
+            guard image.z > 1e-9 else { return nil }
+            let adjusted = probe.adjustedIntrinsics(for: crop)
+            let projected = adjusted * image
+            return SIMD2<Double>(projected.x / projected.z, projected.y / projected.z)
+        }
+
+        let ahead = SIMD3<Double>(40.0, 0.0, 0.0)
+        // Nose up must push the road FURTHER DOWN the image.
+        if let level = imagePoint(ahead, pitch: 0, roll: 0, yaw: 0),
+           let up = imagePoint(ahead, pitch: five, roll: 0, yaw: 0) {
+            if !(up.y > level.y + 1.0) {
+                failures.append(String(format: "pitch +5 deg moved row %.1f -> %.1f, expected down",
+                                       level.y, up.y))
+            }
+        } else {
+            failures.append("pitch probe fell behind the camera")
+        }
+        // Camera yawed LEFT must move a straight-ahead point RIGHT in the image.
+        if let level = imagePoint(ahead, pitch: 0, roll: 0, yaw: 0),
+           let left = imagePoint(ahead, pitch: 0, roll: 0, yaw: five) {
+            if !(left.x > level.x + 1.0) {
+                failures.append(String(format: "yaw +5 deg moved column %.1f -> %.1f, expected right",
+                                       level.x, left.x))
+            }
+        } else {
+            failures.append("yaw probe fell behind the camera")
+        }
+        // Camera rolled clockwise from behind (left side higher) must DROP the
+        // left end of the horizon relative to the right.
+        var rolled = calibration
+        rolled.pose.pitch = 0
+        rolled.pose.yaw = 0
+        rolled.pose.roll = five
+        if let onLeft = rolled.vanishingPoint(SIMD3<Double>(1.0, 0.3, 0.0), crop: crop),
+           let onRight = rolled.vanishingPoint(SIMD3<Double>(1.0, -0.3, 0.0), crop: crop) {
+            if !(onLeft.y > onRight.y) {
+                failures.append(String(format: "roll +5 deg put the left horizon at %.1f, right at %.1f",
+                                       onLeft.y, onRight.y))
+            }
+        } else {
+            failures.append("roll probe has no vanishing point")
+        }
+
+        return Result(name: "mount axes (pitch, roll, yaw)",
+                      passed: failures.isEmpty,
+                      detail: failures.isEmpty
+                          ? "collapses to Ry(pitch); all three signs correct"
+                          : failures.joined(separator: "; "))
+    }
+
+
     // MARK: - Golden files
 
     private static func floats(_ bundle: Bundle, _ name: String) -> [Float]? {
@@ -264,9 +375,13 @@ struct SelfCheck {
                 SIMD3<Double>(k[1][0], k[1][1], k[1][2]),
                 SIMD3<Double>(k[2][0], k[2][1], k[2][2]),
             ])
-            return Calibration(pitch: calibrationBlock.pitchDeg * .pi / 180.0,
-                               height: calibrationBlock.cameraHeight,
-                               forwardOfOrigin: calibrationBlock.cameraForward,
+            var pose = MountPose.fallback
+            pose.pitch = calibrationBlock.pitchDeg * .pi / 180.0
+            pose.roll = 0.0
+            pose.yaw = 0.0
+            pose.height = calibrationBlock.cameraHeight
+            pose.forwardOfOrigin = calibrationBlock.cameraForward
+            return Calibration(pose: pose,
                                K: intrinsics,
                                frameWidth: calibrationBlock.frameSize[0],
                                frameHeight: calibrationBlock.frameSize[1])
