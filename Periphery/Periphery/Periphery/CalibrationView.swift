@@ -35,6 +35,37 @@ private enum Help {
         the reading further than the height being measured. A tape measure is ±2 cm \
         and free, which is why the slider is the source of truth.
         """
+    static let camera = """
+        The drive-time estimator, and the only one of these that measures the \
+        mount rather than guessing at it.
+
+        Optical flow radiates from the direction the car is travelling. That \
+        point is the vanishing point of travel, so its offset from the optical \
+        axis IS the mount angle — and it is immune to road grade, because on a \
+        hill the travel direction and the camera tilt together. Measured on \
+        comma2k19 against carrier-phase GNSS/INS: 0.103° mean absolute error, \
+        inside the 0.25° budget, converging in about 20 s of straight driving.
+
+        Moving cars are excluded by consensus, not by recognising them. Flow \
+        from everything nailed down agrees on one focus; a car moving \
+        independently does not, and is outvoted.
+
+        NIGHT DOES NOT WORK. The only trackable features after dark are \
+        headlights and reflections, which move on their own — on the one night \
+        segment tested, zero frames reached consensus. It fails by producing \
+        nothing, which is why it is safe to leave running.
+        """
+    static let detections = """
+        0.50 is the measured operating point: precision 0.647, recall 0.678. \
+        Roughly a third of the boxes at that threshold are false, and that is \
+        the model, not a bug in the decode — raise the threshold to trade \
+        recall for a cleaner view.
+
+        The shape filter is separate and cheap. The box coder exponentiates its \
+        size codes, so a confident candidate can decode to a fourteen-metre car \
+        or a box floating two metres off the road. Those are impossible rather \
+        than merely unlikely, so they are dropped regardless of score.
+        """
     static let yaw = """
         Camera heading minus course, so it needs the car moving above 5 m/s with a \
         trustworthy course. 1° is 0.70 m of lateral error at 40 m, applied to every \
@@ -68,10 +99,12 @@ struct CalibrationView: View {
     var body: some View {
         NavigationStack {
             List {
+                cameraSection
                 pitchSection
                 heightSection
                 yawSection
                 rollSection
+                detectionSection
                 diagnosticsSection
                 Section {
                     Button("Reset to defaults", role: .destructive) { model.reset() }
@@ -80,6 +113,125 @@ struct CalibrationView: View {
             .navigationTitle("Calibrate")
         }
         .task { await model.attach() }
+    }
+
+    // MARK: - Camera estimator
+
+    private var cameraSection: some View {
+        Section {
+            LabeledContent("state") {
+                Text(cameraState)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(cameraStateColour)
+            }
+            if snapshot.foe.reportable {
+                LabeledContent("pitch") {
+                    Text(String(format: "%+.2f° ± %.2f°",
+                                snapshot.foe.pitchDegrees, snapshot.foe.sigmaDegrees))
+                        .font(.system(.body, design: .monospaced))
+                }
+                LabeledContent("yaw") {
+                    Text(String(format: "%+.2f°", snapshot.foe.yawDegrees))
+                        .font(.system(.body, design: .monospaced))
+                }
+                LabeledContent("window") {
+                    Text("\(snapshot.foe.samples) / \(snapshot.foe.windowSize) "
+                         + "· \(snapshot.foe.inliers) inliers")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("accepted") {
+                    Text(String(format: "%.0f%% of recent pairs",
+                                snapshot.foe.acceptRate * 100))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                // The ablation, live. On comma2k19 de-rotation moved the answer
+                // by 0.00-0.12 deg and helped every time. A LARGE gap here means
+                // the gyro-to-camera axis mapping is wrong, not that the
+                // correction is working hard.
+                LabeledContent("without de-rotation") {
+                    Text(String(format: "%+.2f°  (Δ%+.2f°)",
+                                snapshot.foe.pitchWithoutDerotationDegrees,
+                                snapshot.foe.pitchDegrees
+                                    - snapshot.foe.pitchWithoutDerotationDegrees))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(derotationColour)
+                }
+            }
+            Toggle("Apply it automatically once converged", isOn: $model.autoApplyFOE)
+            Button("Use this pitch now") { model.applyEstimatedPitch() }
+                .disabled(!canApplyFOE)
+            Button("Use this yaw now") { model.applyEstimatedYaw() }
+                .disabled(!canApplyFOE)
+            if !snapshot.foe.gates.writesToPose {
+                Text("The Flow tab has the estimator in handheld mode. That "
+                     + "measures the angle of your hand, so it cannot be "
+                     + "applied to the mount.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            Button("Start the window again") { model.resetFOE() }
+                .font(.caption)
+        } header: {
+            Text("Drive-time pitch — camera")
+        } footer: {
+            Text(Help.camera).font(.caption2)
+        }
+    }
+
+    private var canApplyFOE: Bool {
+        snapshot.foe.reportable && snapshot.foe.gates.writesToPose
+    }
+
+    private var cameraState: String {
+        let foe = snapshot.foe
+        if foe.converged { return "converged" }
+        if foe.reportable { return "settling" }
+        return foe.gate.isEmpty ? "warming up" : foe.gate
+    }
+
+    private var cameraStateColour: Color {
+        let foe = snapshot.foe
+        if foe.converged { return .green }
+        if foe.reportable { return .orange }
+        return .secondary
+    }
+
+    /// De-rotation should be a small correction. Anything past a degree is an
+    /// axis-convention bug wearing the costume of a working feature.
+    private var derotationColour: Color {
+        let delta = abs(snapshot.foe.pitchDegrees
+                        - snapshot.foe.pitchWithoutDerotationDegrees)
+        return delta > 1.0 ? .red : .secondary
+    }
+
+    // MARK: - Detections
+
+    private var detectionSection: some View {
+        Section {
+            HStack {
+                Text(String(format: "%.2f", model.scoreThreshold))
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 70, alignment: .leading)
+                Slider(value: $model.scoreThreshold, in: 0.20...0.95, step: 0.01)
+            }
+            .onChange(of: model.scoreThreshold) { _, value in
+                model.applyScoreThreshold(value)
+            }
+            Text(model.scoreThreshold == Contract.scoreThreshold
+                 ? "the measured operating point"
+                 : String(format: "%+.2f from the measured operating point",
+                          model.scoreThreshold - Contract.scoreThreshold))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Toggle("Drop impossible box shapes", isOn: $model.rejectImplausible)
+            LabeledContent("drawn now", value: "\(snapshot.detections.count) boxes")
+        } header: {
+            Text("Detections")
+        } footer: {
+            Text(Help.detections).font(.caption2)
+        }
     }
 
     // MARK: - Pitch
@@ -282,6 +434,13 @@ final class CalibrationModel: ObservableObject {
     @Published var pitchDegrees: Double = 0
     @Published var height: Double = 1.20
     @Published var calibrator = HeightCalibrator()
+    @Published var scoreThreshold: Double = Contract.scoreThreshold
+    @Published var rejectImplausible = true {
+        didSet { pipeline.setRejectImplausible(rejectImplausible) }
+    }
+    @Published var autoApplyFOE = true {
+        didSet { pipeline.setAutoApplyFOE(autoApplyFOE) }
+    }
 
     private var pipeline: FramePipeline { LiveSession.shared.pipeline }
     private var attached = false
@@ -306,6 +465,9 @@ final class CalibrationModel: ObservableObject {
         attached = true
         pitchDegrees = pipeline.currentPose.pitchDegrees
         height = pipeline.currentPose.height
+        scoreThreshold = pipeline.currentScoreThreshold
+        rejectImplausible = pipeline.currentRejectImplausible
+        autoApplyFOE = pipeline.currentAutoApplyFOE
         // The altimeter stream already feeds the recorder; tee it here too
         // rather than opening a second CMAltimeter.
         let existing = pipeline.motion.onAltitude
@@ -335,6 +497,13 @@ final class CalibrationModel: ObservableObject {
     }
     func applyYaw() { pipeline.applyMeasuredYaw() }
     func clearYaw() { pipeline.clearYaw() }
+    func applyEstimatedPitch() {
+        pipeline.applyEstimatedPitch()
+        pitchDegrees = pipeline.currentPose.pitchDegrees
+    }
+    func applyEstimatedYaw() { pipeline.applyEstimatedYaw() }
+    func resetFOE() { pipeline.foe.reset() }
+    func applyScoreThreshold(_ value: Double) { pipeline.setScoreThreshold(value) }
 
     func reset() {
         pipeline.resetPose()

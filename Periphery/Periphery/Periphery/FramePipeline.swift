@@ -53,11 +53,18 @@ final class FramePipeline: @unchecked Sendable {
         /// on the camera preview. Computed here because this is where the
         /// calibration lives.
         var guides = GroundGuides()
+        /// The drive-time camera estimator. Grade-immune, unlike gravity, and
+        /// self-announcing when it fails -- see FocusOfExpansion.
+        var foe = FocusOfExpansion.Estimate()
+        /// Score below which a candidate is not drawn. 0.50 is the measured
+        /// operating point; above it, precision rises and recall falls.
+        var scoreThreshold = Contract.scoreThreshold
     }
 
     private let camera = CameraSession()
     let motion = MotionSource()
     let recorder = DriveRecorder()
+    let foe = FocusOfExpansion()
     private var preprocessor: Preprocessor?
     private var detector: Detector?
     private var calibration: Calibration?
@@ -72,6 +79,14 @@ final class FramePipeline: @unchecked Sendable {
     private var measuredRoll: Double = 0
     private var measuredYaw: Double?
     private var gravityPitch: Double = 0
+    /// Live operating point. Written from the Calibrate tab, read here.
+    private var scoreThreshold = Contract.scoreThreshold
+    /// Reject boxes whose decoded dimensions are not a vehicle. Off in the
+    /// goldens, on live -- see Decode.plausible.
+    private var rejectImplausible = true
+    /// Hand the camera estimate to the pose without a person asking, once it
+    /// has converged.
+    private var autoApplyFOE = true
 
     /// Beyond this the mount is not one the projection can follow.
     private static let rollLimit = 25.0 * Double.pi / 180.0
@@ -146,6 +161,40 @@ final class FramePipeline: @unchecked Sendable {
         pose.save()
     }
 
+    /// Apply the camera estimator's pitch now, as an explicit choice. Tagged
+    /// `.estimated` rather than `.manual` because it IS the estimator's number,
+    /// and tagging it manual would freeze out later, better windows.
+    func applyEstimatedPitch() {
+        let estimate = foe.estimate
+        guard estimate.gates.writesToPose, estimate.reportable else { return }
+        pose.pitchDegrees = estimate.pitchDegrees
+        pose.pitchFrom = .estimated
+        pose.pitchSigmaDegrees = estimate.sigmaDegrees
+        pose.save()
+    }
+
+    /// The mount yaw the same fit gives for free. Independent of the compass
+    /// path in `applyMeasuredYaw`, and available without a course fix.
+    func applyEstimatedYaw() {
+        let estimate = foe.estimate
+        guard estimate.gates.writesToPose, estimate.reportable else { return }
+        pose.yawDegrees = estimate.yawDegrees
+        pose.yawFrom = .estimated
+        pose.save()
+    }
+
+    /// Live operating point for the decoder. 0.50 is where precision and recall
+    /// were measured (P 0.647 / R 0.678); raising it trades recall for
+    /// precision and is the honest lever on a cluttered view.
+    func setScoreThreshold(_ value: Double) { scoreThreshold = value }
+    var currentScoreThreshold: Double { scoreThreshold }
+
+    func setRejectImplausible(_ value: Bool) { rejectImplausible = value }
+    var currentRejectImplausible: Bool { rejectImplausible }
+
+    func setAutoApplyFOE(_ value: Bool) { autoApplyFOE = value }
+    var currentAutoApplyFOE: Bool { autoApplyFOE }
+
     func resetPose() {
         pose = .fallback
         MountPose.clear()
@@ -214,6 +263,10 @@ final class FramePipeline: @unchecked Sendable {
             }
 
             self.recorder.append(attitude: attitude)
+            // The camera estimator needs rotation rate on its own timeline, at
+            // CoreMotion's rate rather than the frame rate: it averages over
+            // each frame pair's interval.
+            self.foe.append(rotationRate: attitude.rotationRate, at: attitude.timestamp)
 
             if let heading = attitude.cameraHeading, let fix = self.motion.latestLocation,
                fix.course >= 0, fix.courseAccuracy >= 0, fix.courseAccuracy < 5.0,
@@ -233,11 +286,39 @@ final class FramePipeline: @unchecked Sendable {
 
     // MARK: Per frame
 
+    /// Take the camera estimate once it has converged.
+    ///
+    /// Precedence does the rest: `.estimated` outranks everything automatic, so
+    /// this supersedes gravity and a typed-in starting guess -- which is what a
+    /// starting guess is for -- and a person's later explicit action still wins.
+    private func acceptFOE(_ estimate: FocusOfExpansion.Estimate) {
+        // `converged` is already false for any profile that may not write the
+        // pose, but state it here too: a handheld reading is the angle of a
+        // HAND, and silently installing it as the mount angle would be the
+        // worst kind of bug -- plausible, persistent, and saved to disk.
+        guard estimate.gates.writesToPose else { return }
+        guard autoApplyFOE, estimate.converged else { return }
+        guard MountPose.Provenance.estimated.mayOverwrite(pose.pitchFrom) else { return }
+        pose.pitchDegrees = estimate.pitchDegrees
+        pose.pitchFrom = .estimated
+        pose.pitchSigmaDegrees = estimate.sigmaDegrees
+    }
+
     private func handle(_ frame: CameraSession.Frame) {
         // Recording is deliberately AHEAD of the busy guard. The recorded
         // drive is the artefact; detection is a passenger on it. A detector
         // that falls behind must not punch holes in the video.
         recorder.append(frame: frame)
+
+        // Also ahead of the busy guard, and for the same reason: the estimator
+        // wants an even sample of the drive, not whatever the detector happened
+        // to leave time for. It drops its own frames internally.
+        if let calibration {
+            foe.feed(frame: frame, calibration: calibration,
+                     speed: motion.latestLocation?.speed ?? -1)
+        }
+        let estimate = foe.estimate
+        acceptFOE(estimate)
 
         guard !busy else { dropped += 1; return }
         busy = true
@@ -271,6 +352,8 @@ final class FramePipeline: @unchecked Sendable {
         snapshot.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
         snapshot.recording = recorder.status
         snapshot.gravityPitchDegrees = gravityPitch * 180.0 / .pi
+        snapshot.foe = estimate
+        snapshot.scoreThreshold = scoreThreshold
 
         do {
             let calibration = try calibrate(with: frame)
@@ -287,7 +370,9 @@ final class FramePipeline: @unchecked Sendable {
             snapshot.preprocessMS = Self.ms(since: mark)
 
             mark = DispatchTime.now()
-            snapshot.detections = try detector.detect(image: input)
+            snapshot.detections = try detector.detect(image: input,
+                                                      scoreThreshold: scoreThreshold,
+                                                      rejectImplausible: rejectImplausible)
             snapshot.inferenceMS = Self.ms(since: mark)
             recorder.append(detections: snapshot.detections, at: frame.presentationTime)
         } catch {

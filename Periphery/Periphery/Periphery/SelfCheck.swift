@@ -43,6 +43,7 @@ struct SelfCheck {
         results.append(checkLUT(bundle, calibration, manifest))
         results.append(checkDecode(bundle, manifest))
         results.append(checkMountAxes(calibration))
+        results.append(checkFocusOfExpansion())
         return results
     }
 
@@ -57,6 +58,67 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    /// Round-trip the focus-of-expansion inversion against the forward
+    /// projection it inverts.
+    ///
+    /// `Calibration.sourceVanishingPoint((1,0,0))` says where straight-ahead
+    /// lands for a known mount. The estimator measures that pixel and runs the
+    /// map backwards. Feeding the forward answer into the backward map must
+    /// return the mount it started from -- and must do so at nonzero ROLL,
+    /// which is the term that mixes the vertical and horizontal offsets into
+    /// each other and the one a sign error hides in.
+    ///
+    /// Without this, a flipped sign produces a confident, plausible, wrong
+    /// pitch: no crash, no NaN, just every range off by a fixed factor.
+    private static func checkFocusOfExpansion() -> Result {
+        // A representative windshield rig; the numbers only have to be
+        // self-consistent, since this checks a round trip.
+        let K = simd_double3x3(rows: [
+            SIMD3<Double>(910.0, 0.0, 582.0),
+            SIMD3<Double>(0.0, 910.0, 437.0),
+            SIMD3<Double>(0.0, 0.0, 1.0),
+        ])
+        let cases: [(pitch: Double, roll: Double, yaw: Double)] = [
+            (0, 0, 0),
+            (-3.659, 0, 0),
+            (2.5, 0, 0),
+            (-3.0, 6.0, 0),
+            (-3.0, 0, 4.0),
+            (1.5, -8.0, -5.0),
+            (-6.0, 12.0, 3.5),
+        ]
+        var worst = 0.0
+        var worstCase = "-"
+        for c in cases {
+            var pose = MountPose.fallback
+            pose.pitchDegrees = c.pitch
+            pose.rollDegrees = c.roll
+            pose.yawDegrees = c.yaw
+            let calibration = Calibration(pose: pose, K: K,
+                                          frameWidth: 1164, frameHeight: 874)
+            guard let point = calibration
+                .sourceVanishingPoint(SIMD3<Double>(1.0, 0.0, 0.0)) else {
+                return Result(name: "focus of expansion", passed: false,
+                              detail: "no vanishing point at "
+                                    + "pitch \(c.pitch) roll \(c.roll) yaw \(c.yaw)")
+            }
+            let recovered = FocusOfExpansion.mountAngles(
+                foe: point,
+                fx: K[0][0], fy: K[1][1], cx: K[2][0], cy: K[2][1],
+                roll: pose.roll)
+            let dPitch = abs(recovered.pitch * 180.0 / .pi - c.pitch)
+            let dYaw = abs(recovered.yaw * 180.0 / .pi - c.yaw)
+            if max(dPitch, dYaw) > worst {
+                worst = max(dPitch, dYaw)
+                worstCase = "pitch \(c.pitch) roll \(c.roll) yaw \(c.yaw)"
+            }
+        }
+        // Degrees. Pure float arithmetic on a round trip, so this should be
+        // machine-epsilon small; 1e-6 deg is 0.0000004% of the 0.25 deg budget.
+        return Result(name: "focus of expansion", passed: worst < 1e-6,
+                      detail: "7 mounts round-tripped, worst \(format(worst))° at \(worstCase)")
+    }
 
     private static func checkVoxelPoints(_ bundle: Bundle) -> Result {
         guard let golden = floats(bundle, "selfcheck_points") else {

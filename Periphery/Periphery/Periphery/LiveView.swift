@@ -4,10 +4,17 @@
 //  The pipeline lives in FramePipeline.swift and the renderer in WorldView.swift.
 //  What is left here is SwiftUI and the main-actor model that feeds it.
 //
-//  Calibration is cold-start only: intrinsics come live from AVFoundation, and
-//  pitch comes from gravity. Gravity-referenced pitch absorbs road grade
-//  (measured: a 2.18 deg mean grade walked 1.91 deg into the estimate over 40
-//  seconds), so this is a starting pose, not the drive-time estimator.
+//  LANDSCAPE. The app is landscape-locked and this screen is split down the
+//  middle: camera on the left, bird's-eye on the right. That is not a taste
+//  decision. The capture buffer is landscape however the phone is held, so a
+//  portrait mount does not rotate the image, it lays the road sideways across a
+//  crop computed for the other axis -- see MotionSource.cameraRoll. A screen
+//  that stacks a 16:9 preview above a world view in portrait wastes most of the
+//  glass on letterboxing and shows both panes too small to read while driving.
+//
+//  Intrinsics come live from AVFoundation. Pitch starts from gravity, which
+//  absorbs road grade one-for-one (2.45 deg p95 over 237 segments), and is
+//  superseded by the camera estimator in FocusOfExpansion once it converges.
 
 import AVFoundation
 import Combine
@@ -23,10 +30,25 @@ struct CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.layer.session = session
         view.layer.videoGravity = .resizeAspect
+        // Zero rotation relative to the sensor's native readout, i.e. show the
+        // buffer exactly as it arrives. GroundGuideOverlay draws in SOURCE
+        // PIXELS and maps them with a single uniform scale, so any rotation
+        // here would silently slide the horizon off the road while leaving the
+        // number in the stats strip looking fine.
+        pinRotation(view)
         return view
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    // The layer's connection is not always established by the time makeUIView
+    // returns, so pin it again once the view is in the hierarchy.
+    func updateUIView(_ uiView: PreviewView, context: Context) { pinRotation(uiView) }
+
+    private func pinRotation(_ view: PreviewView) {
+        guard let connection = view.layer.connection,
+              connection.isVideoRotationAngleSupported(0),
+              connection.videoRotationAngle != 0 else { return }
+        connection.videoRotationAngle = 0
+    }
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
@@ -88,67 +110,118 @@ struct LiveView: View {
     @ObservedObject private var model = LiveSession.shared
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                ZStack(alignment: .topLeading) {
-                    if let session = model.session {
-                        CameraPreview(session: session)
-                            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                            .overlay {
-                                if model.showGuides {
-                                    GroundGuideOverlay(guides: model.snapshot.guides)
-                                }
+        // No NavigationStack: a title bar costs a fifth of the height in
+        // landscape and this screen has nothing to navigate to.
+        HStack(spacing: 1) {
+            cameraPane
+            worldPane
+        }
+        .background(Color.black)
+        .overlay(alignment: .bottomLeading) { stats }
+        .overlay(alignment: .topTrailing) { guidesToggle }
+        .statusBarHidden()
+        .task { await model.ensureStarted() }
+    }
+
+    /// Left half. `.fill` rather than `.fit`: at a 50/50 split the pane is
+    /// roughly square and fitting a 16:9 preview into it would letterbox away
+    /// most of the image. The guides are drawn in the same geometry, so they
+    /// stay registered to the road either way.
+    private var cameraPane: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black
+                if let session = model.session {
+                    CameraPreview(session: session)
+                        .aspectRatio(16.0 / 9.0, contentMode: .fill)
+                        // Attached BEFORE the frame, so the overlay inherits
+                        // the preview's aspect-filled bounds and the two are
+                        // clipped together. Attach it after and the guides get
+                        // the pane's geometry instead, which is a different
+                        // scale and slides the horizon off the road.
+                        .overlay {
+                            if model.showGuides {
+                                GroundGuideOverlay(guides: model.snapshot.guides)
                             }
-                    } else {
-                        Color.black.aspectRatio(16.0 / 9.0, contentMode: .fit)
-                            .overlay(Text(model.status).font(.caption)
-                                .foregroundStyle(.white))
-                    }
-                }
-                WorldView(detections: model.snapshot.detections,
-                          focal: model.snapshot.focal > 0
-                              ? model.snapshot.focal : Contract.trainedFocal,
-                          egoSpeed: model.snapshot.speed)
-                stats
-            }
-            .navigationTitle("Live")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                Button {
-                    model.showGuides.toggle()
-                } label: {
-                    Image(systemName: model.showGuides
-                          ? "grid.circle.fill" : "grid.circle")
+                        }
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                } else {
+                    Text(model.status)
+                        .font(.caption)
+                        .foregroundStyle(.white)
                 }
             }
         }
-        .task { await model.ensureStarted() }
+    }
+
+    /// Right half.
+    private var worldPane: some View {
+        WorldView(detections: model.snapshot.detections,
+                  focal: model.snapshot.focal > 0
+                      ? model.snapshot.focal : Contract.trainedFocal,
+                  egoSpeed: model.snapshot.speed)
+    }
+
+    private var guidesToggle: some View {
+        Button {
+            model.showGuides.toggle()
+        } label: {
+            Image(systemName: model.showGuides ? "grid.circle.fill" : "grid.circle")
+                .font(.title3)
+                .foregroundStyle(.white)
+                .padding(8)
+                .background(.black.opacity(0.45), in: Circle())
+        }
+        .padding(10)
     }
 
     private var stats: some View {
         let snapshot = model.snapshot
-        return VStack(alignment: .leading, spacing: 2) {
-            Text(String(format: "%.1f fps · preprocess %.1f ms · inference %.1f ms · %d boxes",
+        return VStack(alignment: .leading, spacing: 1) {
+            Text(String(format: "%.1f fps · pre %.1f · inf %.1f ms · %d boxes @ %.2f",
                         snapshot.fps, snapshot.preprocessMS, snapshot.inferenceMS,
-                        snapshot.detections.count))
-            Text(String(format: "pitch %+.2f (%@) · roll %+.2f (%@) · yaw %@",
+                        snapshot.detections.count, snapshot.scoreThreshold))
+            Text(String(format: "pitch %+.2f (%@) · roll %+.2f · yaw %+.2f (%@)",
                         snapshot.pose.pitchDegrees, snapshot.pose.pitchFrom.label,
-                        snapshot.measuredRollDegrees, snapshot.pose.rollFrom.label,
-                        snapshot.measuredYawDegrees.map { String(format: "%+.2f", $0) } ?? "--"))
-            Text(String(format: "focal %.1f px · crop %@ · %@ · %@",
-                        snapshot.focal, snapshot.cropDescription,
+                        snapshot.measuredRollDegrees,
+                        snapshot.pose.yawDegrees, snapshot.pose.yawFrom.label))
+            foeLine(snapshot.foe)
+            Text(String(format: "focal %.0f px · %@ · thermal %@ · dropped %d",
+                        snapshot.focal,
                         snapshot.speed >= 0 ? String(format: "%.1f m/s", snapshot.speed) : "no fix",
-                        snapshot.relativeAltitude.map { String(format: "%+.2f m baro", $0) } ?? "no baro"))
-            Text("thermal \(snapshot.thermal) · dropped \(snapshot.dropped)"
-                 + (snapshot.note.isEmpty ? "" : " · \(snapshot.note)"))
-                .foregroundStyle(snapshot.note.isEmpty ? Color.secondary : Color.red)
+                        snapshot.thermal, snapshot.dropped))
+            if !snapshot.note.isEmpty {
+                Text(snapshot.note).foregroundStyle(Color.red)
+            }
             if !snapshot.mountWarning.isEmpty {
                 Text(snapshot.mountWarning).foregroundStyle(Color.orange)
             }
         }
-        .font(.system(size: 11, design: .monospaced))
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.92))
+        .padding(6)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6))
         .padding(8)
+    }
+
+    /// The camera estimator, in one line. When it is not accumulating, the
+    /// reason is the point -- a night drive and a slow street look different,
+    /// and both look different from a bug.
+    private func foeLine(_ foe: FocusOfExpansion.Estimate) -> some View {
+        let text: String
+        let colour: Color
+        if foe.reportable {
+            text = String(format: "camera pitch %+.2f ±%.2f · %d/%d · %d inliers",
+                          foe.pitchDegrees, foe.sigmaDegrees,
+                          foe.samples, foe.windowSize, foe.inliers)
+            colour = foe.converged ? .green : .yellow
+        } else {
+            text = "camera pitch — \(foe.gate.isEmpty ? "warming up" : foe.gate)"
+                 + (foe.samples > 0 ? " · \(foe.samples) samples" : "")
+            colour = .white.opacity(0.6)
+        }
+        return Text(text).foregroundStyle(colour)
     }
 }
 

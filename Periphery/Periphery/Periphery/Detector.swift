@@ -128,7 +128,8 @@ final class Detector {
     /// One frame. `image` is [1, 3, 256, 512] float32, normalised per the
     /// contract: (pixel - MEAN) / STD on 0-255 values, RGB.
     func detect(image: MLMultiArray,
-                scoreThreshold: Double = Contract.scoreThreshold) throws -> [Detection] {
+                scoreThreshold: Double = Contract.scoreThreshold,
+                rejectImplausible: Bool = false) throws -> [Detection] {
         var timing = InferenceTiming()
 
         // The image arrives float32 from Preprocessor; convert only if the
@@ -171,7 +172,8 @@ final class Detector {
                                                    boxes: boxPointer.baseAddress!,
                                                    directions: directionPointer.baseAddress!,
                                                    anchors: anchors,
-                                                   scoreThreshold: scoreThreshold)
+                                                   scoreThreshold: scoreThreshold,
+                                                   rejectImplausible: rejectImplausible)
                 }
             }
         }

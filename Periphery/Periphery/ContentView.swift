@@ -17,6 +17,10 @@
 //              drive -- the corpus this project has never had of its own.
 //  Calibrate   the four numbers the projection depends on, ordered by how much
 //              damage each does when wrong.
+//  Flow        the camera pitch estimator made visible, on foot: walk forward
+//              and watch the focus of expansion, the inliers and the angle.
+//              Exercises the whole path -- Vision, gyro axes, three sign
+//              conventions -- in ten seconds, indoors, without a car.
 //
 
 import SwiftUI
@@ -30,6 +34,8 @@ struct ContentView: View {
                 .tabItem { Label("Record", systemImage: "record.circle") }
             CalibrationView()
                 .tabItem { Label("Calibrate", systemImage: "level") }
+            FlowView()
+                .tabItem { Label("Flow", systemImage: "arrow.up.right.circle") }
             SelfCheckView()
                 .tabItem { Label("Self-check", systemImage: "checkmark.seal") }
             ComputePlanView()
