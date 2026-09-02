@@ -29,6 +29,7 @@ final class FramePipeline: @unchecked Sendable {
         var thermal: String = "nominal"
         var dropped: Int = 0
         var note: String = ""
+        var pose = MountPose.fallback
     }
 
     private let camera = CameraSession()
@@ -40,9 +41,9 @@ final class FramePipeline: @unchecked Sendable {
     private var dropped = 0
     private var lastFrameTime: DispatchTime?
     private var smoothedFPS = 0.0
-    /// Gravity-referenced, radians, positive nose-up. Written by CoreMotion,
-    /// read on the capture queue.
-    private var pitch = -3.659 * Double.pi / 180.0
+    /// The mount pose the LUT is built from. Pitch is gravity-referenced for
+    /// now -- written by CoreMotion, read on the capture queue.
+    private var pose = MountPose.load()
 
     var onSnapshot: ((Snapshot) -> Void)?
     var session: AVCaptureSession { camera.session }
@@ -74,7 +75,8 @@ final class FramePipeline: @unchecked Sendable {
             let measured = asin(max(-1.0, min(1.0, gravity.z)))
             // Heavy smoothing: this is the seconds-to-minutes timescale, and
             // per-frame rattle belongs to the gyro, not here.
-            self.pitch = self.pitch * 0.98 + measured * 0.02
+            self.pose.pitch = self.pose.pitch * 0.98 + measured * 0.02
+            self.pose.pitchFrom = .gravity
         }
     }
 
@@ -98,7 +100,8 @@ final class FramePipeline: @unchecked Sendable {
         var snapshot = Snapshot()
         snapshot.fps = smoothedFPS
         snapshot.dropped = dropped
-        snapshot.pitchDegrees = pitch * 180.0 / .pi
+        snapshot.pitchDegrees = pose.pitchDegrees
+        snapshot.pose = pose
         snapshot.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
 
         do {
@@ -128,17 +131,20 @@ final class FramePipeline: @unchecked Sendable {
     private func calibrate(with frame: CameraSession.Frame) throws -> Calibration {
         let intrinsics = frame.intrinsics ?? Self.fallbackIntrinsics(width: frame.width,
                                                                     height: frame.height)
-        var updated = Calibration(pitch: pitch,
-                                  height: 1.20,
-                                  forwardOfOrigin: 1.65,
+        let updated = Calibration(pose: pose,
                                   K: intrinsics,
                                   frameWidth: frame.width,
                                   frameHeight: frame.height)
         if let existing = calibration {
-            let pitchMoved = abs(existing.pitch - updated.pitch) > 0.0005   // ~0.03 deg
+            // ~0.03 deg on any axis. The LUT depends on the pose, not the
+            // image, so rebuilding it per frame would be pure waste.
+            let poseMoved = abs(existing.pitch - updated.pitch) > 0.0005
+                || abs(existing.roll - updated.roll) > 0.0005
+                || abs(existing.yaw - updated.yaw) > 0.0005
+                || abs(existing.height - updated.height) > 0.005
             let opticsMoved = existing.K[0][0] != updated.K[0][0]
                 || existing.frameWidth != updated.frameWidth
-            if !pitchMoved && !opticsMoved {
+            if !poseMoved && !opticsMoved {
                 return existing
             }
         }
@@ -147,7 +153,6 @@ final class FramePipeline: @unchecked Sendable {
         } else {
             detector?.updateCalibration(updated)
         }
-        updated.pitch = pitch
         calibration = updated
         return updated
     }

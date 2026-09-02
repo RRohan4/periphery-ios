@@ -3,6 +3,10 @@
 //
 //  Ports periphery/sources/comma2k19.py (sensor_T_vehicle, focal_matched_crop)
 //  and periphery/perception/fastbev.py (image_transform, cityscapes_projection).
+//
+//  The Python has pitch only. Roll and yaw are added here because the phone
+//  has them and comma's rig did not: `sensor_T_vehicle` reduces to exactly the
+//  Python's Ry(pitch) when both are zero, which is what the goldens check.
 
 import Foundation
 import simd
@@ -30,21 +34,38 @@ struct ImageCrop {
 
 struct Calibration {
 
-    /// Mount pitch against the DIRECTION OF TRAVEL, positive nose-up, radians.
-    /// Not against gravity: road grade cancels identically in the travel
-    /// reference and does not in the gravity one, where a 2 deg mean grade
-    /// walks straight into the pitch estimate.
-    var pitch: Double
-    /// Camera height above the road, metres. Forgiving: d(range)/d(height) is
-    /// range/height, so 1 cm is a pure 0.8% scale factor.
-    var height: Double
-    /// Camera position forward of the vehicle origin, metres.
-    var forwardOfOrigin: Double
+    /// Where the camera is and which way it points.
+    var pose: MountPose
     /// Intrinsics of the SOURCE frame, before any crop or resize.
     var K: simd_double3x3
     /// Size of the source frame, pixels.
     var frameWidth: Int
     var frameHeight: Int
+
+    init(pose: MountPose, K: simd_double3x3, frameWidth: Int, frameHeight: Int) {
+        self.pose = pose
+        self.K = K
+        self.frameWidth = frameWidth
+        self.frameHeight = frameHeight
+    }
+
+    // MARK: Convenience
+
+    /// Mount pitch against the DIRECTION OF TRAVEL, positive nose-up, radians.
+    /// Not against gravity: road grade cancels identically in the travel
+    /// reference and does not in the gravity one, where a 2 deg mean grade
+    /// walks straight into the pitch estimate.
+    var pitch: Double {
+        get { pose.pitch }
+        set { pose.pitch = newValue }
+    }
+    var roll: Double { pose.roll }
+    var yaw: Double { pose.yaw }
+    /// Camera height above the road, metres. Forgiving: d(range)/d(height) is
+    /// range/height, so 1 cm is a pure 0.8% scale factor.
+    var height: Double { pose.height }
+    /// Camera position forward of the vehicle origin, metres.
+    var forwardOfOrigin: Double { pose.forwardOfOrigin }
 
     // MARK: - Mount pose
 
@@ -58,16 +79,11 @@ struct Calibration {
     /// it applies twice the mount angle instead of cancelling it, the ground
     /// plane lands in the wrong image rows, and the failure looks like a bad
     /// detector rather than a bad transform. Ported literally, variable names
-    /// and all, from comma2k19.sensor_T_vehicle.
+    /// and all, from comma2k19.sensor_T_vehicle -- and now with two more axes
+    /// that carry exactly the same risk.
     var sensorTVehicle: simd_double4x4 {
-        let down = -pitch
-        let c = cos(-down), s = sin(-down)
-        let rotation = simd_double3x3(rows: [
-            SIMD3<Double>(c, 0.0, s),
-            SIMD3<Double>(0.0, 1.0, 0.0),
-            SIMD3<Double>(-s, 0.0, c),
-        ])
-        let camera = SIMD3<Double>(forwardOfOrigin, 0.0, height)
+        let rotation = Self.vehicleToSensor(pitch: pose.pitch, roll: pose.roll, yaw: pose.yaw)
+        let camera = SIMD3<Double>(pose.forwardOfOrigin, 0.0, pose.height)
         let translation = -(rotation * camera)
         return simd_double4x4(rows: [
             SIMD4<Double>(rotation[0][0], rotation[1][0], rotation[2][0], translation.x),
@@ -77,12 +93,84 @@ struct Calibration {
         ])
     }
 
+    /// Vehicle -> sensor rotation for a mount that is yawed, then pitched, then
+    /// rolled (intrinsic Z-Y-X applied to the sensor). Transposing that gives
+    ///
+    ///     R = Rx(-roll) * Ry(pitch) * Rz(-yaw)
+    ///
+    /// which collapses to the Python's `Ry(pitch)` the moment roll and yaw are
+    /// zero -- deliberately, so the existing goldens still gate the pitch term.
+    ///
+    /// How to tell if a sign got flipped, without a golden:
+    ///   * pitch +5 deg (nose up) must push a ground point 40 m ahead FURTHER
+    ///     DOWN the image, not up;
+    ///   * yaw +5 deg (camera points left) must move a straight-ahead point to
+    ///     the RIGHT in the image;
+    ///   * roll +5 deg (left side of the camera higher) must drop the left end
+    ///     of the horizon.
+    /// SelfCheck asserts all three.
+    static func vehicleToSensor(pitch: Double, roll: Double, yaw: Double) -> simd_double3x3 {
+        let cr = cos(-roll), sr = sin(-roll)
+        let cp = cos(pitch), sp = sin(pitch)
+        let cy = cos(-yaw), sy = sin(-yaw)
+        let rx = simd_double3x3(rows: [
+            SIMD3<Double>(1.0, 0.0, 0.0),
+            SIMD3<Double>(0.0, cr, -sr),
+            SIMD3<Double>(0.0, sr, cr),
+        ])
+        let ry = simd_double3x3(rows: [
+            SIMD3<Double>(cp, 0.0, sp),
+            SIMD3<Double>(0.0, 1.0, 0.0),
+            SIMD3<Double>(-sp, 0.0, cp),
+        ])
+        let rz = simd_double3x3(rows: [
+            SIMD3<Double>(cy, -sy, 0.0),
+            SIMD3<Double>(sy, cy, 0.0),
+            SIMD3<Double>(0.0, 0.0, 1.0),
+        ])
+        return rx * ry * rz
+    }
+
     /// Closed-form horizon row in the network image, for the self-check the
-    /// Python detect script runs: the vanishing row of the ground plane.
+    /// Python detect script runs: the vanishing row of the ground plane
+    /// straight ahead.
+    ///
+    /// With roll this is a point on the horizon, not the whole horizon --
+    /// `horizonLine` gives the line. At zero roll and yaw the two agree and
+    /// this reduces to the Python's `cy + fy * tan(pitch)`.
     var horizonRow: Double {
         let crop = focalMatchedCrop()
+        guard let point = vanishingPoint(SIMD3<Double>(1.0, 0.0, 0.0), crop: crop) else {
+            let adjusted = adjustedIntrinsics(for: crop)
+            return adjusted[2][1] + adjusted[1][1] * tan(pose.pitch)
+        }
+        return point.y
+    }
+
+    /// The ground plane's horizon in NETWORK IMAGE pixels, as two points on it.
+    /// Drawing this over the camera preview turns pitch from a number you have
+    /// to trust into something you can watch land on the road.
+    ///
+    /// Ground directions are the vehicle-frame vectors with no z component;
+    /// their vanishing points are where parallel ground lines meet, and any two
+    /// of them span the horizon.
+    func horizonLine(crop: ImageCrop) -> (a: SIMD2<Double>, b: SIMD2<Double>)? {
+        guard let forward = vanishingPoint(SIMD3<Double>(1.0, 0.0, 0.0), crop: crop),
+              let left = vanishingPoint(SIMD3<Double>(0.0, 1.0, 0.0), crop: crop) else {
+            return nil
+        }
+        return (forward, left)
+    }
+
+    /// Where a vehicle-frame DIRECTION (not a point) lands on the network
+    /// image: the point at infinity along it, so translation drops out.
+    func vanishingPoint(_ direction: SIMD3<Double>, crop: ImageCrop) -> SIMD2<Double>? {
+        let rotation = Self.vehicleToSensor(pitch: pose.pitch, roll: pose.roll, yaw: pose.yaw)
+        let image = Contract.sensorToImageAxes * (rotation * direction)
+        guard image.z > 1e-9 else { return nil }
         let adjusted = adjustedIntrinsics(for: crop)
-        return adjusted[2][1] + adjusted[1][1] * tan(pitch)
+        let projected = adjusted * image
+        return SIMD2<Double>(projected.x / projected.z, projected.y / projected.z)
     }
 
     // MARK: - Focal matching

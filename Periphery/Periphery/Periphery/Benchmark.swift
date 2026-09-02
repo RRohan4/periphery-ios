@@ -88,9 +88,7 @@ enum Benchmark {
             SIMD3<Double>(0, focal, 437),
             SIMD3<Double>(0, 0, 1),
         ])
-        return Calibration(pitch: -3.659 * .pi / 180.0,
-                           height: 1.20,
-                           forwardOfOrigin: 1.65,
+        return Calibration(pose: .fallback,
                            K: intrinsics,
                            frameWidth: 1164,
                            frameHeight: 874)
