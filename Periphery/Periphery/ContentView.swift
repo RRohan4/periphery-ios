@@ -14,6 +14,8 @@
 //  Live        the whole pipeline on camera frames, with a bird's-eye overlay.
 //  Record      video, every sensor and the detections, into one directory per
 //              drive -- the corpus this project has never had of its own.
+//  Calibrate   the four numbers the projection depends on, ordered by how much
+//              damage each does when wrong.
 //
 
 import SwiftUI
@@ -25,6 +27,8 @@ struct ContentView: View {
                 .tabItem { Label("Live", systemImage: "car.side") }
             RecordView()
                 .tabItem { Label("Record", systemImage: "record.circle") }
+            CalibrationView()
+                .tabItem { Label("Calibrate", systemImage: "level") }
             SelfCheckView()
                 .tabItem { Label("Self-check", systemImage: "checkmark.seal") }
             ComputePlanView()
