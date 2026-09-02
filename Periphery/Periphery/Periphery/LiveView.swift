@@ -39,7 +39,7 @@ struct CameraPreview: UIViewRepresentable {
 // MARK: - Screen
 
 struct LiveView: View {
-    @StateObject private var model = LiveModel()
+    @ObservedObject private var model = LiveSession.shared
 
     var body: some View {
         NavigationStack {
@@ -60,8 +60,7 @@ struct LiveView: View {
             .navigationTitle("Live")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .task { await model.start() }
-        .onDisappear { model.stop() }
+        .task { await model.ensureStarted() }
     }
 
     private var stats: some View {
@@ -91,18 +90,32 @@ struct LiveView: View {
     }
 }
 
+/// One camera, one pipeline, one recorder.
+///
+/// Live, Record and Calibrate are three views onto the same running session,
+/// so it cannot live inside any one of them -- and the camera cannot be opened
+/// twice. Recording in particular has to survive leaving the Live tab, which is
+/// why nothing here stops on `onDisappear`.
 @MainActor
-final class LiveModel: ObservableObject {
+final class LiveSession: ObservableObject {
+    static let shared = LiveSession()
+
     @Published var snapshot = FramePipeline.Snapshot()
-    @Published var status = "starting camera…"
+    @Published var status = "idle"
     @Published var session: AVCaptureSession?
 
-    private let pipeline = FramePipeline()
+    let pipeline = FramePipeline()
+    private var starting = false
     private var started = false
 
-    func start() async {
-        guard !started else { return }
-        started = true
+    private init() {}
+
+    /// Idempotent and safe to call from any tab.
+    func ensureStarted() async {
+        guard !started, !starting else { return }
+        starting = true
+        defer { starting = false }
+        status = "starting camera…"
         pipeline.onSnapshot = { [weak self] snapshot in
             Task { @MainActor in self?.snapshot = snapshot }
         }
@@ -110,13 +123,17 @@ final class LiveModel: ObservableObject {
             try await pipeline.start()
             session = pipeline.session
             status = "running"
+            started = true
         } catch {
             status = String(describing: error)
         }
     }
 
+    /// Only on the way out of the app. A drive in progress outlives any tab.
     func stop() {
+        guard started else { return }
         pipeline.stop()
         started = false
+        session = nil
     }
 }

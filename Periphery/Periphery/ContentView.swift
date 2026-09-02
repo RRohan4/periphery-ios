@@ -12,6 +12,8 @@
 //  Latency     the number the port exists for: per-frame cost of backbone,
 //              gather, head and decode, and whether it survives ten minutes.
 //  Live        the whole pipeline on camera frames, with a bird's-eye overlay.
+//  Record      video, every sensor and the detections, into one directory per
+//              drive -- the corpus this project has never had of its own.
 //
 
 import SwiftUI
@@ -21,6 +23,8 @@ struct ContentView: View {
         TabView {
             LiveView()
                 .tabItem { Label("Live", systemImage: "car.side") }
+            RecordView()
+                .tabItem { Label("Record", systemImage: "record.circle") }
             SelfCheckView()
                 .tabItem { Label("Self-check", systemImage: "checkmark.seal") }
             ComputePlanView()

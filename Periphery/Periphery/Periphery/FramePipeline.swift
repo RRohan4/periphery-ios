@@ -39,10 +39,12 @@ final class FramePipeline: @unchecked Sendable {
         var relativeAltitude: Double?
         /// Set when the mount is somewhere the projection cannot follow.
         var mountWarning: String = ""
+        var recording = DriveRecorder.Status()
     }
 
     private let camera = CameraSession()
     let motion = MotionSource()
+    let recorder = DriveRecorder()
     private var preprocessor: Preprocessor?
     private var detector: Detector?
     private var calibration: Calibration?
@@ -61,6 +63,10 @@ final class FramePipeline: @unchecked Sendable {
     private static let rollLimit = 25.0 * Double.pi / 180.0
 
     var onSnapshot: ((Snapshot) -> Void)?
+    /// The pose as of the last frame, for the recorder's manifest and the
+    /// Calibrate tab. Read off the capture queue; a torn Double here would only
+    /// mis-stamp a manifest, never the pipeline.
+    var currentPose: MountPose { pose }
     var session: AVCaptureSession { camera.session }
 
     func start() async throws {
@@ -110,6 +116,8 @@ final class FramePipeline: @unchecked Sendable {
                 self.pose.rollFrom = .fallback
             }
 
+            self.recorder.append(attitude: attitude)
+
             if let heading = attitude.cameraHeading, let fix = self.motion.latestLocation,
                fix.course >= 0, fix.courseAccuracy >= 0, fix.courseAccuracy < 5.0,
                fix.speed > 5.0 {
@@ -117,12 +125,23 @@ final class FramePipeline: @unchecked Sendable {
                                                          course: fix.course)
             }
         }
+        motion.onLocation = { [weak self] location in
+            self?.recorder.append(location: location)
+        }
+        motion.onAltitude = { [weak self] altitude in
+            self?.recorder.append(altitude: altitude)
+        }
         motion.start()
     }
 
     // MARK: Per frame
 
     private func handle(_ frame: CameraSession.Frame) {
+        // Recording is deliberately AHEAD of the busy guard. The recorded
+        // drive is the artefact; detection is a passenger on it. A detector
+        // that falls behind must not punch holes in the video.
+        recorder.append(frame: frame)
+
         guard !busy else { dropped += 1; return }
         busy = true
         defer { busy = false }
@@ -153,6 +172,7 @@ final class FramePipeline: @unchecked Sendable {
                 measuredRoll * 180.0 / .pi)
         }
         snapshot.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
+        snapshot.recording = recorder.status
 
         do {
             let calibration = try calibrate(with: frame)
@@ -168,6 +188,7 @@ final class FramePipeline: @unchecked Sendable {
             mark = DispatchTime.now()
             snapshot.detections = try detector.detect(image: input)
             snapshot.inferenceMS = Self.ms(since: mark)
+            recorder.append(detections: snapshot.detections, at: frame.presentationTime)
         } catch {
             snapshot.note = String(describing: error)
         }
