@@ -9,6 +9,27 @@
 import Combine
 import SwiftUI
 
+/// Footer copy, hoisted out of the ViewBuilders. A chain of `+`-concatenated
+/// literals inside a ViewBuilder is a well-known way to blow the type checker's
+/// budget; multi-line literals in a plain enum cost it nothing.
+private enum Help {
+    static let whileRecording = """
+        Encoding is real thermal load. The Latency tab's numbers are not valid while \
+        this is running.
+        """
+    static let beforeRecording = """
+        1080p is about 4.5 GB per hour. Video, every sensor at its own rate, the \
+        detections, and the clock anchors that tie them together.
+        """
+    static let export = """
+        Files → On My iPhone → Periphery, or plug into a Mac and open the device in \
+        Finder. Each drive is one folder; copy the whole thing.
+
+        Offline: scripts/ingest_iphone_drive.py in the periphery repo turns it into a \
+        segment the existing chain already reads.
+        """
+}
+
 struct RecordView: View {
     @StateObject private var model = RecordModel()
 
@@ -33,12 +54,7 @@ struct RecordView: View {
                 } header: {
                     Text("Recorder")
                 } footer: {
-                    Text(model.status.recording
-                         ? "Encoding is real thermal load. The Latency tab's numbers "
-                           + "are not valid while this is running."
-                         : "1080p is about 4.5 GB per hour. Video, every sensor at its "
-                           + "own rate, the detections, and the clock anchors that tie "
-                           + "them together.")
+                    Text(model.status.recording ? Help.whileRecording : Help.beforeRecording)
                         .font(.caption2)
                 }
 
@@ -71,12 +87,7 @@ struct RecordView: View {
                 } header: {
                     Text("Drives")
                 } footer: {
-                    Text("Files → On My iPhone → Periphery, or plug into a Mac and open "
-                         + "the device in Finder. Each drive is one folder; copy the whole "
-                         + "thing.\n\nOffline: scripts/ingest_iphone_drive.py in the "
-                         + "periphery repo turns it into a segment the existing chain "
-                         + "already reads.")
-                        .font(.caption2)
+                    Text(Help.export).font(.caption2)
                 }
 
                 if let error = model.error {

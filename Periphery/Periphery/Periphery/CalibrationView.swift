@@ -10,6 +10,55 @@
 import Combine
 import SwiftUI
 
+/// Footer copy, hoisted out of the ViewBuilders.
+///
+/// A chain of `+`-concatenated string literals inside a ViewBuilder is a
+/// well-known way to blow the type checker's budget -- it did, on the
+/// diagnostics section. Multi-line literals in a plain enum cost it nothing.
+private enum Help {
+    static let pitchDegrees = """
+        The dominant error term. Range sensitivity is r²/h, so 0.25° is the design \
+        budget, 0.50° is tolerable and 1.00° is a declared failure.
+
+        This is a STARTING GUESS, not a lock. It outranks gravity, which measures \
+        mount + road grade and cannot separate them — over 237 drive segments it \
+        tracks grade one-for-one, costing 2.45° p95 — so gravity will not walk your \
+        number back. The drive-time estimator outranks both and will supersede it \
+        once it has enough road, which is the whole point of seeding it.
+        """
+    static let height = """
+        Forgiving: d(range)/range = d(height)/height, a pure scale factor, so 5 cm \
+        is about 4% of range.
+
+        The barometer works — 1.2 m of lift is ~0.14 hPa against ~0.02 hPa of noise \
+        — but the limit is cabin pressure, not the sensor. A door or the HVAC moves \
+        the reading further than the height being measured. A tape measure is ±2 cm \
+        and free, which is why the slider is the source of truth.
+        """
+    static let yaw = """
+        Camera heading minus course, so it needs the car moving above 5 m/s with a \
+        trustworthy course. 1° is 0.70 m of lateral error at 40 m, applied to every \
+        box — cheap, but not free.
+        """
+    static let roll = """
+        No input needed. Unlike pitch, roll is honestly measurable from gravity: its \
+        contaminant is road camber, ~0.6° and mean-zero, not the 2.45° of grade.
+
+        Zero means the phone's +x edge — the right edge when held upright — points \
+        up. A portrait mount reads −90°, and that is unrecoverable rather than merely \
+        wrong: the capture buffer is landscape however the phone is held, so portrait \
+        lays the road sideways across the crop.
+        """
+    static let diagnostics = """
+        A sane windshield mount lands 50–70% of voxels on the feature map. Near zero \
+        means the pitch sign is flipped.
+
+        The heading cross-check compares the attitude-derived camera bearing against \
+        CLHeading, which comes from a different stack. A persistent 90° or 180° gap \
+        means the attitude convention is wrong, not the mount.
+        """
+}
+
 struct CalibrationView: View {
     @ObservedObject private var live = LiveSession.shared
     @StateObject private var model = CalibrationModel()
@@ -70,14 +119,7 @@ struct CalibrationView: View {
         } header: {
             Text("Mount pitch")
         } footer: {
-            Text("The dominant error term. Range sensitivity is r²/h, so 0.25° is "
-                 + "the design budget, 0.50° is tolerable and 1.00° is a declared "
-                 + "failure.\n\nThis is a STARTING GUESS, not a lock. It outranks "
-                 + "gravity, which measures mount + road grade and cannot separate "
-                 + "them — over 237 drive segments it tracks grade one-for-one, "
-                 + "costing 2.45° p95 — so gravity will not walk your number back. "
-                 + "The drive-time estimator outranks both and will supersede it "
-                 + "once it has enough road, which is the whole point of seeding it.")
+            Text(Help.pitchDegrees)
                 .font(.caption2)
         }
     }
@@ -128,12 +170,7 @@ struct CalibrationView: View {
         } header: {
             Text("Camera height")
         } footer: {
-            Text("Forgiving: d(range)/range = d(height)/height, a pure scale factor, "
-                 + "so 5 cm is about 4% of range.\n\nThe barometer works — 1.2 m of "
-                 + "lift is ~0.14 hPa against ~0.02 hPa of noise — but the limit is "
-                 + "cabin pressure, not the sensor. A door or the HVAC moves the "
-                 + "reading further than the height being measured. A tape measure "
-                 + "is ±2 cm and free, which is why the slider is the source of truth.")
+            Text(Help.height)
                 .font(.caption2)
         }
     }
@@ -168,9 +205,7 @@ struct CalibrationView: View {
         } header: {
             Text("Mount yaw")
         } footer: {
-            Text("Camera heading minus course, so it needs the car moving above "
-                 + "5 m/s with a trustworthy course. 1° is 0.70 m of lateral error "
-                 + "at 40 m, applied to every box — cheap, but not free.")
+            Text(Help.yaw)
                 .font(.caption2)
         }
     }
@@ -194,13 +229,7 @@ struct CalibrationView: View {
         } header: {
             Text("Mount roll")
         } footer: {
-            Text("No input needed. Unlike pitch, roll is honestly measurable from "
-                 + "gravity: its contaminant is road camber, ~0.6° and mean-zero, "
-                 + "not the 2.45° of grade.\n\nZero means the phone's +x edge — the "
-                 + "right edge when held upright — points up. A portrait mount reads "
-                 + "−90°, and that is unrecoverable rather than merely wrong: the "
-                 + "capture buffer is landscape however the phone is held, so "
-                 + "portrait lays the road sideways across the crop.")
+            Text(Help.roll)
                 .font(.caption2)
         }
     }
@@ -210,30 +239,41 @@ struct CalibrationView: View {
     private var diagnosticsSection: some View {
         Section {
             LabeledContent("visible voxels") {
-                Text(String(format: "%.1f%%", snapshot.visibleFraction * 100))
+                Text(visibleText)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(snapshot.visibleFraction > 0.35 ? .primary : .red)
+                    .foregroundStyle(visibleColor)
             }
             LabeledContent("focal") {
-                Text(String(format: "%.1f px %@", snapshot.focal,
-                            snapshot.focalMatched ? "" : "— UNMATCHED"))
+                Text(focalText)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(snapshot.focalMatched ? .primary : .orange)
+                    .foregroundStyle(focalColor)
             }
             LabeledContent("crop", value: snapshot.cropDescription)
-            LabeledContent("reference frame",
-                           value: model.trueNorth ? "true north" : "arbitrary — yaw unusable")
+            LabeledContent("reference frame", value: referenceFrameText)
             LabeledContent("heading vs compass", value: model.headingCrossCheck)
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("A sane windshield mount lands 50–70% of voxels on the feature map. "
-                 + "Near zero means the pitch sign is flipped.\n\nThe heading "
-                 + "cross-check compares the attitude-derived camera bearing against "
-                 + "CLHeading, which comes from a different stack. A persistent 90° "
-                 + "or 180° gap means the attitude convention is wrong, not the mount.")
-                .font(.caption2)
+            Text(Help.diagnostics).font(.caption2)
         }
+    }
+
+    // Precomputed so the ViewBuilder above stays trivial to type-check.
+    private var visibleText: String {
+        String(format: "%.1f%%", snapshot.visibleFraction * 100)
+    }
+    private var visibleColor: Color {
+        snapshot.visibleFraction > 0.35 ? .primary : .red
+    }
+    private var focalText: String {
+        let suffix = snapshot.focalMatched ? "" : " — UNMATCHED"
+        return String(format: "%.1f px", snapshot.focal) + suffix
+    }
+    private var focalColor: Color {
+        snapshot.focalMatched ? .primary : .orange
+    }
+    private var referenceFrameText: String {
+        model.trueNorth ? "true north" : "arbitrary — yaw unusable"
     }
 }
 
