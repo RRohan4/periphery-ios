@@ -40,6 +40,15 @@ final class FramePipeline: @unchecked Sendable {
         /// Set when the mount is somewhere the projection cannot follow.
         var mountWarning: String = ""
         var recording = DriveRecorder.Status()
+        /// Raw gravity pitch, degrees, always -- even when pitch is locked to a
+        /// manual or estimated value, so the two can be compared.
+        var gravityPitchDegrees: Double = 0
+        /// Fraction of voxels landing on the feature map. A sane windshield
+        /// mount sits around 0.5-0.7; near zero means the pitch sign is flipped.
+        var visibleFraction: Double = 0
+        /// False when the frame is too narrow to reach the trained focal, in
+        /// which case every range carries a scale error that must be stated.
+        var focalMatched = true
     }
 
     private let camera = CameraSession()
@@ -58,6 +67,7 @@ final class FramePipeline: @unchecked Sendable {
     private var smoothedRoll: Double?
     private var measuredRoll: Double = 0
     private var measuredYaw: Double?
+    private var gravityPitch: Double = 0
 
     /// Beyond this the mount is not one the projection can follow.
     private static let rollLimit = 25.0 * Double.pi / 180.0
@@ -67,6 +77,75 @@ final class FramePipeline: @unchecked Sendable {
     /// Calibrate tab. Read off the capture queue; a torn Double here would only
     /// mis-stamp a manifest, never the pipeline.
     var currentPose: MountPose { pose }
+
+    /// Raw gravity pitch in radians, whether or not pitch is locked to it.
+    var currentGravityPitch: Double { gravityPitch }
+    var currentMeasuredYaw: Double? { measuredYaw }
+
+    // MARK: - Pose edits
+    //
+    // Called from the Calibrate tab on the main actor, against a `pose` the
+    // capture queue also writes. The next frame rebuilds the LUT from a whole
+    // copy of the struct, so the worst case is one frame of mixed geometry --
+    // against which the alternative, a lock on the 100 Hz attitude path, is a
+    // poor trade.
+
+    /// An explicit choice by a person; always accepted.
+    func setPitch(degrees: Double, from provenance: MountPose.Provenance = .manual) {
+        pose.pitchDegrees = degrees
+        pose.pitchFrom = provenance
+        pose.save()
+    }
+
+    /// An automatic update, subject to precedence. This is how the drive-time
+    /// estimator supersedes a typed-in guess without a manual entry being able
+    /// to freeze the pose forever.
+    @discardableResult
+    func offerPitch(_ radians: Double, from provenance: MountPose.Provenance) -> Bool {
+        guard provenance.mayOverwrite(pose.pitchFrom) else { return false }
+        pose.pitch = radians
+        pose.pitchFrom = provenance
+        return true
+    }
+
+    /// Hand pitch back to gravity. Not "the answer" -- gravity measures
+    /// mount + road grade -- but the only thing available while stopped.
+    func releasePitchToGravity() {
+        pose.pitch = gravityPitch
+        pose.pitchFrom = .gravity
+        pose.save()
+    }
+
+    func setHeight(_ metres: Double, from provenance: MountPose.Provenance = .manual) {
+        pose.height = metres
+        pose.heightFrom = provenance
+        pose.save()
+    }
+
+    func setForwardOfOrigin(_ metres: Double) {
+        pose.forwardOfOrigin = metres
+        pose.save()
+    }
+
+    /// Apply the measured yaw offset. Gated by the caller on course accuracy
+    /// and speed; 1 degree is 0.70 m of lateral error at 40 m, on every box.
+    func applyMeasuredYaw() {
+        guard let yaw = measuredYaw else { return }
+        pose.yaw = yaw
+        pose.yawFrom = .estimated
+        pose.save()
+    }
+
+    func clearYaw() {
+        pose.yaw = 0
+        pose.yawFrom = .fallback
+        pose.save()
+    }
+
+    func resetPose() {
+        pose = .fallback
+        MountPose.clear()
+    }
     var session: AVCaptureSession { camera.session }
 
     func start() async throws {
@@ -88,11 +167,25 @@ final class FramePipeline: @unchecked Sendable {
     private func startMotion() {
         motion.onAttitude = { [weak self] attitude in
             guard let self else { return }
-            // Heavy smoothing on both: this is the seconds-to-minutes
-            // timescale, and per-frame rattle belongs to the gyro, not here.
-            // MotionSource runs at 100 Hz, so tau is about 0.5 s.
-            self.pose.pitch = self.pose.pitch * 0.98 + attitude.gravityPitch * 0.02
-            self.pose.pitchFrom = .gravity
+            self.gravityPitch = attitude.gravityPitch
+
+            // Heavy smoothing: this is the seconds-to-minutes timescale, and
+            // per-frame rattle belongs to the gyro, not here. MotionSource runs
+            // at 100 Hz, so tau is about 0.5 s.
+            //
+            // Gravity may only write pitch where it outranks what is already
+            // there. It beats the built-in default and itself, and nothing
+            // else: a typed-in guess or an estimator output must not be walked
+            // back over the next few seconds by a source that cannot tell mount
+            // angle from road grade.
+            //
+            // A typed-in pitch is still only an INITIAL GUESS. It outranks
+            // gravity so it survives, and is outranked by the drive-time
+            // estimator, which is the thing it exists to seed.
+            if MountPose.Provenance.gravity.mayOverwrite(self.pose.pitchFrom) {
+                self.pose.pitch = self.pose.pitch * 0.98 + attitude.gravityPitch * 0.02
+                self.pose.pitchFrom = .gravity
+            }
 
             // Roll IS honestly measurable from gravity -- its contaminant is
             // road camber at ~0.6 deg and mean-zero, not the 2.45 deg of grade
@@ -173,11 +266,14 @@ final class FramePipeline: @unchecked Sendable {
         }
         snapshot.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
         snapshot.recording = recorder.status
+        snapshot.gravityPitchDegrees = gravityPitch * 180.0 / .pi
 
         do {
             let calibration = try calibrate(with: frame)
             let crop = calibration.focalMatchedCrop()
             snapshot.focal = calibration.achievedFocal(crop)
+            snapshot.focalMatched = calibration.focalIsMatched(crop)
+            snapshot.visibleFraction = detector?.visibleVoxelFraction ?? 0
             snapshot.cropDescription = "\(crop.width)x\(crop.height) at (\(crop.x), \(crop.y))"
 
             guard let preprocessor, let detector else { return }

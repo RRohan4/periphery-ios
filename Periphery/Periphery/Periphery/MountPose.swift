@@ -43,6 +43,28 @@ struct MountPose: Codable, Equatable, Sendable {
             }
         }
 
+        /// Precedence. An automatic source may only overwrite a value whose
+        /// rank it meets or beats; an explicit action by a person always wins,
+        /// because it is a person choosing.
+        ///
+        /// The point of the ordering is that a typed-in pitch is an INITIAL
+        /// GUESS, not a lock. It has to outrank gravity, which measures
+        /// mount + road grade and would walk a good number back over a few
+        /// seconds. It must NOT outrank the drive-time estimator, which is the
+        /// thing the guess exists to seed.
+        var rank: Int {
+            switch self {
+            case .fallback: return 0
+            case .gravity: return 1
+            case .manual, .barometer: return 2
+            case .estimated: return 3
+            }
+        }
+
+        /// May a sample from `self` overwrite a value that currently came from
+        /// `current`, with no person in the loop?
+        func mayOverwrite(_ current: Provenance) -> Bool { rank >= current.rank }
+
         /// True when the value is a starting point rather than a measurement of
         /// the mount itself.
         var isPrior: Bool { self == .fallback || self == .gravity }
