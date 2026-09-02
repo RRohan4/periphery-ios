@@ -11,7 +11,8 @@
 //              simulator (no Neural Engine); run it on the phone.
 //  Latency     the number the port exists for: per-frame cost of backbone,
 //              gather, head and decode, and whether it survives ten minutes.
-//  Live        the whole pipeline on camera frames, with a bird's-eye overlay.
+//  Live        the whole pipeline on camera frames, the 2.5D world view, and
+//              the horizon laid over the image so a bad pose is visible.
 //  Record      video, every sensor and the detections, into one directory per
 //              drive -- the corpus this project has never had of its own.
 //  Calibrate   the four numbers the projection depends on, ordered by how much

@@ -36,6 +36,52 @@ struct CameraPreview: UIViewRepresentable {
     }
 }
 
+// MARK: - Ground guides over the preview
+
+/// The horizon and a ladder of ground-distance lines, drawn over the live
+/// image.
+///
+/// This is the cheapest honest check in the app. Pitch error is invisible as a
+/// number -- half a degree reads 40 m as 56 m and still looks like a plausible
+/// angle -- but the same error puts the horizon visibly off the road. Roll tips
+/// the line; yaw slides it sideways. Two of the three signs in
+/// `vehicleToSensor` have no golden vector behind them, so this is how they get
+/// checked: by looking.
+struct GroundGuideOverlay: View {
+    let guides: GroundGuides
+
+    var body: some View {
+        Canvas { context, size in
+            guard guides.frameWidth > 0, guides.frameHeight > 0 else { return }
+            // The preview is 16:9 and so is the buffer, shown with
+            // .resizeAspect, so source pixels scale uniformly onto the view.
+            let scale = size.width / Double(guides.frameWidth)
+            func map(_ p: SIMD2<Double>) -> CGPoint {
+                CGPoint(x: p.x * scale, y: p.y * scale)
+            }
+            if let horizon = guides.horizon {
+                var path = Path()
+                path.move(to: map(horizon.a))
+                path.addLine(to: map(horizon.b))
+                context.stroke(path, with: .color(.cyan.opacity(0.8)),
+                               style: StrokeStyle(lineWidth: 1.5, dash: [8, 5]))
+            }
+            for segment in guides.ranges {
+                var path = Path()
+                path.move(to: map(segment.a))
+                path.addLine(to: map(segment.b))
+                context.stroke(path, with: .color(.yellow.opacity(0.55)), lineWidth: 1)
+                context.draw(Text("\(Int(segment.range))")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.yellow.opacity(0.9)),
+                             at: CGPoint(x: map(segment.b).x + 4, y: map(segment.b).y),
+                             anchor: .leading)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 // MARK: - Screen
 
 struct LiveView: View {
@@ -48,17 +94,33 @@ struct LiveView: View {
                     if let session = model.session {
                         CameraPreview(session: session)
                             .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                            .overlay {
+                                if model.showGuides {
+                                    GroundGuideOverlay(guides: model.snapshot.guides)
+                                }
+                            }
                     } else {
                         Color.black.aspectRatio(16.0 / 9.0, contentMode: .fit)
                             .overlay(Text(model.status).font(.caption)
                                 .foregroundStyle(.white))
                     }
                 }
-                BEVOverlay(detections: model.snapshot.detections)
+                WorldView(detections: model.snapshot.detections,
+                          focal: model.snapshot.focal > 0
+                              ? model.snapshot.focal : Contract.trainedFocal,
+                          egoSpeed: model.snapshot.speed)
                 stats
             }
             .navigationTitle("Live")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button {
+                    model.showGuides.toggle()
+                } label: {
+                    Image(systemName: model.showGuides
+                          ? "grid.circle.fill" : "grid.circle")
+                }
+            }
         }
         .task { await model.ensureStarted() }
     }
@@ -103,6 +165,9 @@ final class LiveSession: ObservableObject {
     @Published var snapshot = FramePipeline.Snapshot()
     @Published var status = "idle"
     @Published var session: AVCaptureSession?
+    /// Horizon and ground lines over the preview. On by default: they are how
+    /// a bad pose becomes visible instead of silently absorbed.
+    @Published var showGuides = true
 
     let pipeline = FramePipeline()
     private var starting = false
