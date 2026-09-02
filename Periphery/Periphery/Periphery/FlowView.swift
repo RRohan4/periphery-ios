@@ -160,7 +160,7 @@ struct FlowView: View {
         VStack(alignment: .leading, spacing: 3) {
             legendRow(.green, "agrees with the focus — static world")
             legendRow(.red, "disagrees — moving, or mistracked")
-            legendRow(.cyan, "the focus of expansion")
+            legendRow(.cyan, "focus — bold is the median, faint is this frame")
         }
     }
 
@@ -220,17 +220,26 @@ private struct FlowOverlay: View {
                                lineWidth: 1.2)
             }
 
-            guard let foe = debug.foe else { return }
-            let centre = map(foe.x, foe.y)
-            let arm = 14.0
-            var cross = Path()
-            cross.move(to: CGPoint(x: centre.x - arm, y: centre.y))
-            cross.addLine(to: CGPoint(x: centre.x + arm, y: centre.y))
-            cross.move(to: CGPoint(x: centre.x, y: centre.y - arm))
-            cross.addLine(to: CGPoint(x: centre.x, y: centre.y + arm))
-            context.stroke(cross, with: .color(.cyan), lineWidth: 2)
-            context.stroke(Path(ellipseIn: CGRect(x: centre.x - 9, y: centre.y - 9,
-                                                  width: 18, height: 18)),
+            func cross(_ at: CGPoint, arm: Double, colour: Color, width: Double) {
+                var path = Path()
+                path.move(to: CGPoint(x: at.x - arm, y: at.y))
+                path.addLine(to: CGPoint(x: at.x + arm, y: at.y))
+                path.move(to: CGPoint(x: at.x, y: at.y - arm))
+                path.addLine(to: CGPoint(x: at.x, y: at.y + arm))
+                context.stroke(path, with: .color(colour), lineWidth: width)
+            }
+
+            // The per-pair fit, faint. It jumps by design: a single pair
+            // scatters ~0.6 deg, measured, in every flow method tried.
+            if let foe = debug.foe {
+                cross(map(foe.x, foe.y), arm: 9, colour: .cyan.opacity(0.35), width: 1)
+            }
+            // The window median, bold. This is the answer.
+            guard let median = debug.medianFoe else { return }
+            let centre = map(median.x, median.y)
+            cross(centre, arm: 16, colour: .cyan, width: 2)
+            context.stroke(Path(ellipseIn: CGRect(x: centre.x - 10, y: centre.y - 10,
+                                                  width: 20, height: 20)),
                            with: .color(.cyan), lineWidth: 1.5)
         }
         .allowsHitTesting(false)
