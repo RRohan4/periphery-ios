@@ -299,13 +299,20 @@ final class Detector {
             .multiArrayConstraint?.dataType ?? .float32
     }
 
+    /// Plain `default`, not `@unknown default`: the SDK has grown a data type
+    /// this does not name, and `@unknown default` only absorbs cases that did
+    /// not exist at compile time, so a new KNOWN case leaves the switch
+    /// non-exhaustive. This is a label for a log line -- there is nothing to
+    /// handle per-type, so covering everything is the correct behaviour rather
+    /// than a silenced warning. The dtypes that must be understood are gated in
+    /// readFloats and writeFloats, which still throw on anything unexpected.
     private static func name(_ type: MLMultiArrayDataType) -> String {
         switch type {
         case .float16: return "float16"
         case .float32: return "float32"
         case .double: return "float64"
         case .int32: return "int32"
-        @unknown default: return "raw \(type.rawValue)"
+        default: return "raw \(type.rawValue)"
         }
     }
 
