@@ -66,6 +66,13 @@ private enum Help {
         or a box floating two metres off the road. Those are impossible rather \
         than merely unlikely, so they are dropped regardless of score.
         """
+    static let focus = """
+        Not cosmetic. Optical flow is built from local intensity differences and         blur is a low-pass filter, so a soft image starves the pitch estimator         long before it bothers the detector.
+
+        There is no portable number for infinity. Lens position 1.0 is the far         MECHANICAL end, and actuators are built to travel past infinity so that         infinity stays reachable across temperature and unit spread — parking         there lands past focus. So: point at something far away, let autofocus         settle, then lock it. That finds the right value for this particular         camera instead of guessing one.
+
+        Locking matters because a moving lens moves the focal length, which         rescales every range. An unlocked lens is workable but it is a caveat         on the whole drive, which is why it is shown rather than hidden.
+        """
     static let yaw = """
         Camera heading minus course, so it needs the car moving above 5 m/s with a \
         trustworthy course. 1° is 0.70 m of lateral error at 40 m, applied to every \
@@ -99,6 +106,7 @@ struct CalibrationView: View {
     var body: some View {
         NavigationStack {
             List {
+                focusSection
                 cameraSection
                 pitchSection
                 heightSection
@@ -113,6 +121,49 @@ struct CalibrationView: View {
             .navigationTitle("Calibrate")
         }
         .task { await model.attach() }
+    }
+
+    // MARK: - Focus
+
+    private var focusSection: some View {
+        Section {
+            LabeledContent("state") {
+                Text(focusState)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(focusColour)
+            }
+            LabeledContent("lens position") {
+                Text(String(format: "%.3f", snapshot.lensPosition))
+                    .font(.system(.body, design: .monospaced))
+            }
+            Button("Point at something far away, then lock focus here") {
+                model.lockFocus()
+            }
+            Button("Hand it back to autofocus") { model.autoFocus() }
+                .font(.caption)
+            HStack {
+                Text(String(format: "%.2f", model.lensPosition))
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 70, alignment: .leading)
+                Slider(value: $model.lensPosition, in: 0...1, step: 0.01)
+            }
+            Button("Lock at that position") { model.applyLensPosition() }
+                .font(.caption)
+        } header: {
+            Text("Focus")
+        } footer: {
+            Text(Help.focus).font(.caption2)
+        }
+    }
+
+    private var focusState: String {
+        if snapshot.focusHunting { return "hunting" }
+        return snapshot.focusLocked ? "locked" : "autofocus (far)"
+    }
+
+    private var focusColour: Color {
+        if snapshot.focusHunting { return .orange }
+        return snapshot.focusLocked ? .green : .yellow
     }
 
     // MARK: - Camera estimator
@@ -435,6 +486,7 @@ final class CalibrationModel: ObservableObject {
     @Published var height: Double = 1.20
     @Published var calibrator = HeightCalibrator()
     @Published var scoreThreshold: Double = Contract.scoreThreshold
+    @Published var lensPosition: Double = 1.0
     @Published var rejectImplausible = true {
         didSet { pipeline.setRejectImplausible(rejectImplausible) }
     }
@@ -466,6 +518,7 @@ final class CalibrationModel: ObservableObject {
         pitchDegrees = pipeline.currentPose.pitchDegrees
         height = pipeline.currentPose.height
         scoreThreshold = pipeline.currentScoreThreshold
+        lensPosition = Double(pipeline.camera.lensPosition)
         rejectImplausible = pipeline.currentRejectImplausible
         autoApplyFOE = pipeline.currentAutoApplyFOE
         // The altimeter stream already feeds the recorder; tee it here too
@@ -504,6 +557,16 @@ final class CalibrationModel: ObservableObject {
     func applyEstimatedYaw() { pipeline.applyEstimatedYaw() }
     func resetFOE() { pipeline.foe.reset() }
     func applyScoreThreshold(_ value: Double) { pipeline.setScoreThreshold(value) }
+
+    /// Freeze the lens where autofocus has just put it. The only reliable way
+    /// to get infinity: it is a different number on every camera.
+    func lockFocus() {
+        lensPosition = Double(pipeline.camera.lockFocusHere())
+    }
+    func autoFocus() { pipeline.camera.apply(.autoFar) }
+    func applyLensPosition() {
+        pipeline.camera.apply(.locked(Float(lensPosition)))
+    }
 
     func reset() {
         pipeline.resetPose()
