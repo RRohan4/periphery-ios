@@ -97,11 +97,10 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     let session = AVCaptureSession()
-    /// Held so per-frame exposure, gain and lens position can be stamped onto
-    /// each Frame. Read-only after configure().
-    private var device: AVCaptureDevice?
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "com.periphery.camera", qos: .userInitiated)
+    /// Held for two reasons: to apply a focus policy, and to stamp each Frame
+    /// with the exposure, gain and lens position it was actually shot at.
     private var device: AVCaptureDevice?
 
     /// Called on the capture queue, not the main thread.
