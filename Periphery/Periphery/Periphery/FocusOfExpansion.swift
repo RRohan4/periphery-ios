@@ -63,10 +63,27 @@ final class FocusOfExpansion: @unchecked Sendable {
     /// Flow shorter than this in the WORKING image is discarded: its direction
     /// is dominated by the flow field's own quantisation.
     static let minFlowPixels = 1.5
-    /// Every Nth camera frame is paired with the one before it. At 30 fps this
-    /// is a 100 ms baseline, which is long enough for good flow magnitude and
-    /// short enough that the scene has not changed.
-    static let frameStride = 3
+    /// Time between the two frames of a pair, seconds. NOT a frame count.
+    ///
+    /// This used to be a bare stride of 3, which silently meant 150 ms on
+    /// comma2k19's 20 fps footage where it was validated and 100 ms on a 30 fps
+    /// phone. Porting a frame count across two capture rates changes the
+    /// measurement; porting a duration does not.
+    ///
+    /// Swept on comma2k19 from 50 to 400 ms. Per-pair scatter is FLAT across
+    /// that whole range (0.60-0.69 deg) -- at highway speed even a 50 ms gap
+    /// gives far more flow than the noise floor needs, so nothing is starved
+    /// and shortening the gap does not hurt. Accuracy after 20 s of road is
+    /// therefore just "more pairs is better": 0.030 deg at 50 ms rising to
+    /// 0.098 deg at 400 ms.
+    ///
+    /// Every one of those is inside the 0.25 deg budget, so this is chosen for
+    /// COST, not accuracy. 100 ms converges to 0.043 deg in 20 s at a tenth of
+    /// the flow passes per second that 50 ms would need. Shorten it only if
+    /// convergence time turns out to matter more than thermal headroom.
+    static let pairSeconds = 0.100
+    /// Fallback until the real frame interval is known.
+    static let defaultFrameStride = 3
     /// Working resolution for the flow field. Vision returns a buffer the size
     /// of its input, so 1920x1080 would be 16 MB per frame.
     static let workingWidth = 448
@@ -237,6 +254,11 @@ final class FocusOfExpansion: @unchecked Sendable {
     /// Under `lock`: written from the capture queue, cleared from `queue`.
     private var _busy = false
     private var frameCounter = 0
+    /// Derived from the measured capture interval so the pair spacing is the
+    /// same duration whatever rate the camera is running at.
+    private var frameStride = FocusOfExpansion.defaultFrameStride
+    private var lastFeedTime: Double = 0
+    private var smoothedInterval: Double = 0
 
     private var previous: CVPixelBuffer?
     private var previousTime: Double = 0
@@ -311,8 +333,10 @@ final class FocusOfExpansion: @unchecked Sendable {
     func feed(frame: CameraSession.Frame,
               calibration: Calibration,
               speed: Double) {
+        let now = CMTimeGetSeconds(frame.presentationTime)
+        updateStride(at: now)
         frameCounter += 1
-        guard frameCounter % Self.frameStride == 0 else { return }
+        guard frameCounter % frameStride == 0 else { return }
 
         // Gate BEFORE the downscale: below the floor there is nothing to
         // measure and the scale is pure waste. A negative floor disables it,
@@ -332,7 +356,7 @@ final class FocusOfExpansion: @unchecked Sendable {
         }
         guard claimed else { return }
 
-        let time = CMTimeGetSeconds(frame.presentationTime)
+        let time = now
         guard let small = downscale(frame.pixelBuffer,
                                     sourceWidth: frame.width,
                                     sourceHeight: frame.height) else {
@@ -347,6 +371,22 @@ final class FocusOfExpansion: @unchecked Sendable {
             self.optics = optics
             self.process(current: small, at: time, roll: roll)
         }
+    }
+
+    /// Track the camera's actual frame interval and pick the stride that lands
+    /// closest to `pairSeconds`. A 30 fps camera gets 3, a 60 fps camera gets 6,
+    /// and both measure the same thing.
+    private func updateStride(at time: Double) {
+        defer { lastFeedTime = time }
+        guard lastFeedTime > 0 else { return }
+        let delta = time - lastFeedTime
+        // Ignore a gap from backgrounding or a dropped run of frames.
+        guard delta > 0.001, delta < 0.2 else { return }
+        smoothedInterval = smoothedInterval == 0
+            ? delta
+            : smoothedInterval * 0.95 + delta * 0.05
+        guard smoothedInterval > 0 else { return }
+        frameStride = max(1, Int((Self.pairSeconds / smoothedInterval).rounded()))
     }
 
     // MARK: - The pair
