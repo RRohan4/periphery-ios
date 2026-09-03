@@ -76,6 +76,21 @@ final class MotionSource: NSObject, @unchecked Sendable {
         var courseAccuracy: Double
     }
 
+    /// CLHeading, ~1 Hz. The magnetometer's own answer.
+    ///
+    /// An INDEPENDENT witness to the attitude-derived camera bearing: the two
+    /// come from different stacks, so agreement is evidence and a persistent 90
+    /// or 180 degree gap means an attitude convention is wrong. That check is
+    /// worth nothing offline unless the raw heading is on disk next to the
+    /// attitude, which is why this is recorded and not merely displayed.
+    struct Heading: Sendable {
+        var timestamp: TimeInterval
+        var wallTimestamp: TimeInterval
+        var trueHeading: Double
+        var magneticHeading: Double
+        var accuracy: Double
+    }
+
     /// CMAltimeter, ~1 Hz. Relative only -- the absolute value is useless.
     struct Altitude: Sendable {
         var timestamp: TimeInterval
@@ -106,6 +121,8 @@ final class MotionSource: NSObject, @unchecked Sendable {
     var onLocation: ((Location) -> Void)?
     /// Called on the motion queue.
     var onAltitude: ((Altitude) -> Void)?
+    /// Called on the main queue, where CLLocationManager delivers.
+    var onHeading: ((Heading) -> Void)?
 
     // MARK: - Latched state, for readers that only want "now"
 
@@ -363,6 +380,13 @@ extension MotionSource: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
         guard newHeading.headingAccuracy >= 0 else { return }
         lock.withLock { _latestTrueHeading = newHeading.trueHeading }
+        let anchor = clockAnchor
+        let wall = newHeading.timestamp.timeIntervalSince1970
+        onHeading?(Heading(timestamp: anchor.bootSeconds + (wall - anchor.wallSeconds),
+                           wallTimestamp: wall,
+                           trueHeading: newHeading.trueHeading,
+                           magneticHeading: newHeading.magneticHeading,
+                           accuracy: newHeading.headingAccuracy))
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

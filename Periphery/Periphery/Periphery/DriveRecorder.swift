@@ -20,10 +20,12 @@
 //      drive_2026-09-02_14-31-07/
 //        manifest.json      device, preset, checkpoint, pose, first video PTS
 //        video.mov          HEVC at the capture rate
-//        frames.csv         pts and the full per-frame K
+//        frames.csv         pts, the full per-frame K, exposure, ISO, lens
 //        motion.csv         gravity, user accel, rotation rate, quaternion
 //        location.csv       both clock domains, speed, course, accuracies
 //        altimeter.csv      relative altitude and pressure
+//        heading.csv        CLHeading -- the magnetometer's independent answer
+//        health.csv         thermal state, fps and drops, once a second
 //        anchors.csv        wall clock against boot clock, every 60 s
 //        detections.jsonl   what the on-device model saw, per frame
 //
@@ -117,6 +119,9 @@ final class DriveRecorder: @unchecked Sendable {
     private var locationCSV: CSVWriter?
     private var altimeterCSV: CSVWriter?
     private var anchorCSV: CSVWriter?
+    private var headingCSV: CSVWriter?
+    private var healthCSV: CSVWriter?
+    private var lastHealth: Double = 0
     private var detectionLog: CSVWriter?
 
     private let lock = NSLock()
@@ -171,7 +176,24 @@ final class DriveRecorder: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    func start(pose: MountPose, quality: Quality = .full, note: String = "") throws {
+    /// Whether the recorded streams mean anything.
+    ///
+    /// These are not statistics, they are validity flags. Heading is
+    /// meaningless outside the true-north reference frame; if intrinsics never
+    /// arrived, every K column in frames.csv is empty; if stabilisation stayed
+    /// on, the geometry moved per frame without saying so. Reading a drive back
+    /// without knowing these is guesswork, so they go in the manifest.
+    struct Capture {
+        var referenceFrame = ""
+        var headingIsTrueNorth = false
+        var stabilizationDisabled = false
+        var intrinsicsAvailable = false
+        var altimeterAvailable = false
+        var attitudeRateHz = 0.0
+    }
+
+    func start(pose: MountPose, quality: Quality = .full, note: String = "",
+               capture: Capture = Capture()) throws {
         guard !isRecording else { throw RecorderError.alreadyRecording }
         let free = Self.freeBytes()
         guard free > Self.freeSpaceFloorBytes else {
@@ -218,7 +240,8 @@ final class DriveRecorder: @unchecked Sendable {
             self.cachedFree = free
 
             self.framesCSV = CSVWriter(dir.appendingPathComponent("frames.csv"),
-                header: "pts,k00,k01,k02,k10,k11,k12,k20,k21,k22,width,height")
+                header: "pts,k00,k01,k02,k10,k11,k12,k20,k21,k22,width,height,"
+                      + "exposure_s,iso,lens")
             self.motionCSV = CSVWriter(dir.appendingPathComponent("motion.csv"),
                 header: "t,gx,gy,gz,ax,ay,az,rx,ry,rz,qx,qy,qz,qw,gravity_pitch,roll,heading")
             self.locationCSV = CSVWriter(dir.appendingPathComponent("location.csv"),
@@ -227,11 +250,15 @@ final class DriveRecorder: @unchecked Sendable {
                 header: "t,relative_altitude,pressure_kpa")
             self.anchorCSV = CSVWriter(dir.appendingPathComponent("anchors.csv"),
                 header: "wall,boot")
+            self.headingCSV = CSVWriter(dir.appendingPathComponent("heading.csv"),
+                header: "t,t_wall,true_heading,magnetic_heading,accuracy")
+            self.healthCSV = CSVWriter(dir.appendingPathComponent("health.csv"),
+                header: "t,thermal,frames,dropped,low_power")
             self.detectionLog = CSVWriter(dir.appendingPathComponent("detections.jsonl"),
                 header: nil)
         }
 
-        writeManifest(dir: dir, pose: pose, quality: quality, note: note)
+        writeManifest(dir: dir, pose: pose, quality: quality, note: note, capture: capture)
 
         lock.withLock {
             _status = Status(recording: true, name: name, elapsed: 0,
@@ -285,6 +312,9 @@ final class DriveRecorder: @unchecked Sendable {
         let pts = frame.presentationTime
         let k = frame.intrinsics
         let width = frame.width, height = frame.height
+        let exposure = frame.exposureSeconds
+        let iso = frame.iso
+        let lens = frame.lensPosition
         queue.async {
             defer { self.lock.withLock { self.inFlight -= 1 } }
             guard self.started, let writer = self.writer, let input = self.videoInput else { return }
@@ -299,6 +329,7 @@ final class DriveRecorder: @unchecked Sendable {
                 self.dropped += 1
             }
             let seconds = CMTimeGetSeconds(pts)
+            let optics = [Self.f(exposure, 6), Self.f(iso, 1), Self.f(lens, 4)]
             if let k {
                 self.framesCSV?.row([
                     Self.f(seconds, 6),
@@ -306,10 +337,24 @@ final class DriveRecorder: @unchecked Sendable {
                     Self.f(k[0][1]), Self.f(k[1][1]), Self.f(k[2][1]),
                     Self.f(k[0][2]), Self.f(k[1][2]), Self.f(k[2][2]),
                     String(width), String(height),
-                ])
+                ] + optics)
             } else {
                 self.framesCSV?.row([Self.f(seconds, 6), "", "", "", "", "", "", "", "", "",
-                                     String(width), String(height)])
+                                     String(width), String(height)] + optics)
+            }
+            // Once a second: did the phone throttle, and did the frame rate
+            // survive it? A drive that thermally degraded halfway through looks
+            // exactly like a drive where the maths got worse, unless this is on
+            // disk.
+            if seconds - self.lastHealth >= 1.0 {
+                self.lastHealth = seconds
+                let info = ProcessInfo.processInfo
+                self.healthCSV?.row([
+                    Self.f(seconds, 3),
+                    Benchmark.describe(info.thermalState),
+                    String(self.frames), String(self.dropped),
+                    info.isLowPowerModeEnabled ? "1" : "0",
+                ])
             }
             self.tick()
         }
@@ -350,6 +395,16 @@ final class DriveRecorder: @unchecked Sendable {
             self.altimeterCSV?.row([Self.f(a.timestamp, 6),
                                     Self.f(a.relativeAltitude, 4),
                                     Self.f(a.pressureKPa, 5)])
+        }
+    }
+
+    func append(heading h: MotionSource.Heading) {
+        guard isRecording else { return }
+        queue.async {
+            self.headingCSV?.row([Self.f(h.timestamp, 6), Self.f(h.wallTimestamp, 6),
+                                  Self.f(h.trueHeading, 3),
+                                  Self.f(h.magneticHeading, 3),
+                                  Self.f(h.accuracy, 3)])
         }
     }
 
@@ -410,7 +465,8 @@ final class DriveRecorder: @unchecked Sendable {
 
     // MARK: - Manifest
 
-    private func writeManifest(dir: URL, pose: MountPose, quality: Quality, note: String) {
+    private func writeManifest(dir: URL, pose: MountPose, quality: Quality, note: String,
+                               capture: Capture) {
         let anchor = MotionSource.sampleAnchor()
         let device = UIDevice.current
         var manifest: [String: Any] = [
@@ -436,6 +492,18 @@ final class DriveRecorder: @unchecked Sendable {
                 "roll_from": pose.rollFrom.rawValue,
                 "yaw_from": pose.yawFrom.rawValue,
                 "height_from": pose.heightFrom.rawValue,
+            ],
+            // Whether the streams above can be trusted at all. Heading is
+            // meaningless outside the true-north frame; intrinsics that never
+            // arrived mean every K column is empty; stabilisation left on means
+            // the geometry moved per frame without saying so.
+            "capture": [
+                "reference_frame": capture.referenceFrame,
+                "heading_is_true_north": capture.headingIsTrueNorth,
+                "stabilization_disabled": capture.stabilizationDisabled,
+                "intrinsics_available": capture.intrinsicsAvailable,
+                "altimeter_available": capture.altimeterAvailable,
+                "attitude_rate_hz": capture.attitudeRateHz,
             ],
             "clocks": [
                 "video_pts": "host time clock (mach_absolute_time), seconds",

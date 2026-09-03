@@ -130,7 +130,8 @@ final class RecordModel: ObservableObject {
         error = nil
         do {
             try recorder?.start(pose: LiveSession.shared.pipeline.currentPose,
-                                quality: quality)
+                                quality: quality,
+                                capture: LiveSession.shared.pipeline.captureFlags)
         } catch {
             self.error = String(describing: error)
         }
