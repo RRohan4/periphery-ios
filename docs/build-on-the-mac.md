@@ -129,9 +129,22 @@ Do these before driving anywhere. Each one fails loudly and cheaply.
 |---|---|---|
 | 1 | **Self-check** | **8 rows, all green.** Not 6 — `focus of expansion` and the rest are new. If `focus of expansion` is red, the camera pitch estimator is producing wrong angles and nothing downstream is worth reading. |
 | 2 | **Compute** | Every operation planned for the Neural Engine, both models. |
-| 3 | **Latency** | Burst, 200 frames. Expect ~3.9 ms median on an A18. |
+| 3 | **Latency** | **Burst only.** Expect ~3.9 ms median on an A18. Do NOT run Sustained — see below. |
 | 4 | **Flow** | Walk forward holding the phone. See below. |
 | 5 | **Live** | Landscape, camera left, bird's-eye right. Horizon line should sit on the real horizon. |
+
+### Do not run Latency → Sustained
+
+The target sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which makes
+`enum Benchmark` implicitly main-actor isolated. The `Task.detached` that wraps
+it therefore hops straight back to the main actor, defeating the comment above
+it — so a ten-minute run freezes the UI and the watchdog may kill the app.
+Swift 5 language mode reports this as a warning, not an error, which is why it
+has always built and always been wrong.
+
+Burst is unaffected. The fix is `nonisolated` on Benchmark, Detector and
+Preprocessor, and it is unwritten because that chain cannot be verified without
+a compiler.
 
 ### The Flow tab, on foot
 
