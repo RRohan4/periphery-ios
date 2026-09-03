@@ -302,6 +302,17 @@ struct BenchmarkView: View {
         UIApplication.shared.isIdleTimerDisabled = true
         // Off the main actor: a ten-minute run would otherwise wedge the UI and
         // the watchdog would kill the app.
+        //
+        // WARNING, AND IT IS A REAL ONE. The target sets
+        // SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor, so `enum Benchmark` is
+        // implicitly main-actor isolated and this `Task.detached` hops straight
+        // back to the main actor -- exactly what the line above says it is
+        // avoiding. Swift 5 language mode reports it as a warning rather than an
+        // error, which is why it built.
+        //
+        // The fix is `nonisolated` on the compute chain (Benchmark, Detector,
+        // Preprocessor), not a cast here. Until that is done and verified,
+        // BURST is fine and SUSTAINED will freeze the UI for ten minutes.
         Task.detached(priority: .userInitiated) {
             do {
                 let outcome = try Benchmark.run(frames: frames,
