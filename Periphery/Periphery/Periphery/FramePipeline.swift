@@ -201,6 +201,19 @@ final class FramePipeline: @unchecked Sendable {
     }
     var session: AVCaptureSession { camera.session }
 
+    /// The validity flags a recorded drive has to carry, gathered from the two
+    /// objects that actually know them.
+    var captureFlags: DriveRecorder.Capture {
+        DriveRecorder.Capture(
+            referenceFrame: motion.headingIsTrueNorth
+                ? "xTrueNorthZVertical" : "xArbitraryZVertical",
+            headingIsTrueNorth: motion.headingIsTrueNorth,
+            stabilizationDisabled: camera.stabilizationDisabled,
+            intrinsicsAvailable: camera.intrinsicsAvailable,
+            altimeterAvailable: motion.altimeterAvailable,
+            attitudeRateHz: motion.attitudeRate)
+    }
+
     func start() async throws {
         guard await CameraSession.requestAccess() else { throw CameraSession.CameraError.denied }
         try camera.configure()
@@ -280,6 +293,9 @@ final class FramePipeline: @unchecked Sendable {
         }
         motion.onAltitude = { [weak self] altitude in
             self?.recorder.append(altitude: altitude)
+        }
+        motion.onHeading = { [weak self] heading in
+            self?.recorder.append(heading: heading)
         }
         motion.start()
     }

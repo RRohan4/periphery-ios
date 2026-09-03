@@ -35,6 +35,22 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         /// a timeline with no conversion. CoreLocation does not; see
         /// MotionSource's clock anchor.
         let presentationTime: CMTime
+        /// Exposure time in seconds.
+        ///
+        /// Recorded because it is the direct measure of MOTION BLUR, and blur is
+        /// what starves optical flow: at 30 m/s a 1/60 s exposure smears a point
+        /// 20 m away across several pixels, which is the same order as the flow
+        /// being measured. Without this, a drive where the estimator quietly
+        /// degraded at dusk is indistinguishable from one where the maths is
+        /// wrong.
+        let exposureSeconds: Double
+        /// Sensor gain. High ISO means a noisy image, which is the other way
+        /// flow quality dies.
+        let iso: Double
+        /// Where the lens is, 0-1. Constant if the focus lock is holding; if it
+        /// moves, the focal length moved with it and every range in that stretch
+        /// carries a scale error.
+        let lensPosition: Double
     }
 
     enum CameraError: Error, CustomStringConvertible {
@@ -52,6 +68,9 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     let session = AVCaptureSession()
+    /// Held so per-frame exposure, gain and lens position can be stamped onto
+    /// each Frame. Read-only after configure().
+    private var device: AVCaptureDevice?
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "com.periphery.camera", qos: .userInitiated)
 
@@ -77,6 +96,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                                                    for: .video, position: .back) else {
             throw CameraError.noCamera
         }
+        self.device = device
         let input = try AVCaptureDeviceInput(device: device)
         guard session.canAddInput(input) else { throw CameraError.cannotAdd("camera input") }
         session.addInput(input)
@@ -131,12 +151,16 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let exposure = device.map { CMTimeGetSeconds($0.exposureDuration) } ?? 0
         onFrame?(Frame(pixelBuffer: pixelBuffer,
                        intrinsics: Self.intrinsics(from: sampleBuffer),
                        width: CVPixelBufferGetWidth(pixelBuffer),
                        height: CVPixelBufferGetHeight(pixelBuffer),
                        sampleBuffer: sampleBuffer,
-                       presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
+                       presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                       exposureSeconds: exposure.isFinite ? exposure : 0,
+                       iso: Double(device?.iso ?? 0),
+                       lensPosition: Double(device?.lensPosition ?? 0)))
     }
 
     /// The per-frame intrinsic matrix AVFoundation attaches when delivery is
