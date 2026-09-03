@@ -217,7 +217,13 @@ final class FramePipeline: @unchecked Sendable {
             stabilizationDisabled: camera.stabilizationDisabled,
             intrinsicsAvailable: camera.intrinsicsAvailable,
             altimeterAvailable: motion.altimeterAvailable,
-            attitudeRateHz: motion.attitudeRate)
+            attitudeRateHz: motion.attitudeRate,
+            focus: {
+                switch camera.focusPolicy {
+                case .autoFar: return "auto (far)"
+                case .locked(let p): return String(format: "locked at %.3f", p)
+                }
+            }())
     }
 
     func start() async throws {

@@ -190,6 +190,12 @@ final class DriveRecorder: @unchecked Sendable {
         var intrinsicsAvailable = false
         var altimeterAvailable = false
         var attitudeRateHz = 0.0
+        /// "locked at 0.83" or "auto (far)". A drive shot with the lens still
+        /// hunting has a focal length that moved during it, so every range in
+        /// that stretch carries a scale error -- and soft focus starves the
+        /// flow field the pitch estimator is built from. frames.csv has the
+        /// per-frame position; this says what the policy was meant to be.
+        var focus = ""
     }
 
     func start(pose: MountPose, quality: Quality = .full, note: String = "",
@@ -504,6 +510,7 @@ final class DriveRecorder: @unchecked Sendable {
                 "intrinsics_available": capture.intrinsicsAvailable,
                 "altimeter_available": capture.altimeterAvailable,
                 "attitude_rate_hz": capture.attitudeRateHz,
+                "focus": capture.focus,
             ],
             "clocks": [
                 "video_pts": "host time clock (mach_absolute_time), seconds",
