@@ -210,27 +210,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         focusPolicy.save()
         return position
     }
-}
 
-// MARK: - Persistence
-
-extension CameraSession.FocusPolicy {
-    private static let key = "CameraSession.FocusPolicy.v1"
-
-    /// A locked position belongs to one physical phone, so it survives a
-    /// restart. It does NOT survive a reset, and it should not: a value carried
-    /// over from another unit would be worse than none.
-    static func load(from defaults: UserDefaults = .standard) -> Self {
-        guard let value = defaults.object(forKey: key) as? Double else { return .autoFar }
-        return .locked(Float(value))
-    }
-
-    func save(to defaults: UserDefaults = .standard) {
-        switch self {
-        case .autoFar: defaults.removeObject(forKey: Self.key)
-        case .locked(let position): defaults.set(Double(position), forKey: Self.key)
-        }
-    }
 
     func start() {
         queue.async { [session] in
@@ -278,5 +258,26 @@ extension CameraSession.FocusPolicy {
             SIMD3<Double>(Double(matrix.columns.1.x), Double(matrix.columns.1.y), Double(matrix.columns.1.z)),
             SIMD3<Double>(Double(matrix.columns.2.x), Double(matrix.columns.2.y), Double(matrix.columns.2.z))
         ))
+    }
+}
+
+// MARK: - Persistence
+
+extension CameraSession.FocusPolicy {
+    private static let key = "CameraSession.FocusPolicy.v1"
+
+    /// A locked position belongs to one physical phone, so it survives a
+    /// restart. It does NOT survive a reset, and it should not: a value carried
+    /// over from another unit would be worse than none.
+    static func load(from defaults: UserDefaults = .standard) -> Self {
+        guard let value = defaults.object(forKey: key) as? Double else { return .autoFar }
+        return .locked(Float(value))
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        switch self {
+        case .autoFar: defaults.removeObject(forKey: Self.key)
+        case .locked(let position): defaults.set(Double(position), forKey: Self.key)
+        }
     }
 }
