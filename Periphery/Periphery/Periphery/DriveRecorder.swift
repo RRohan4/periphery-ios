@@ -141,6 +141,50 @@ final class DriveRecorder: @unchecked Sendable {
 
     var isRecording: Bool { lock.withLock { _status.recording } }
 
+    private var backgroundObserver: NSObjectProtocol?
+
+    // MARK: - Surviving the length of a drive
+
+    /// iOS stops the capture session the moment the app leaves the foreground,
+    /// and nothing on the way out calls `stop()`. The movie is then left with
+    /// its samples written but no `moov` atom, which does not decode -- so a
+    /// screen lock does not truncate a drive, it destroys it. Both halves of
+    /// that are handled here: the screen is held awake while recording, and if
+    /// the app is backgrounded anyway the file is closed properly.
+    init() {
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.finalizeForBackground()
+        }
+    }
+
+    deinit {
+        if let backgroundObserver {
+            NotificationCenter.default.removeObserver(backgroundObserver)
+        }
+    }
+
+    private static func keepScreenAwake(_ on: Bool) {
+        Task { @MainActor in UIApplication.shared.isIdleTimerDisabled = on }
+    }
+
+    /// Backgrounded mid-drive. Frames have already stopped arriving, so the only
+    /// thing still worth doing is closing the file. A short drive that decodes
+    /// beats a long one that does not. The background-task assertion buys the
+    /// seconds `finishWriting` needs before the process is suspended.
+    private func finalizeForBackground() {
+        guard isRecording else { return }
+        Task { @MainActor in
+            let token = UIApplication.shared.beginBackgroundTask(withName: "finalize-drive")
+            self.stop { _ in
+                Task { @MainActor in UIApplication.shared.endBackgroundTask(token) }
+            }
+        }
+    }
+
     // MARK: - Where drives live
 
     static var root: URL {
@@ -214,6 +258,15 @@ final class DriveRecorder: @unchecked Sendable {
 
         let movie = dir.appendingPathComponent("video.mov")
         let assetWriter = try AVAssetWriter(outputURL: movie, fileType: .mov)
+        // A .mov is only readable once `finishWriting` has appended its index.
+        // Until then the samples are all on disk and none of them can be
+        // decoded, so anything that kills the process mid-drive -- a jetsam
+        // kill, a crash, a battery pull -- costs the WHOLE recording rather
+        // than the tail of it. Fragments cap that loss: the writer flushes a
+        // self-describing index every interval, so an unfinalised file still
+        // decodes up to the last one. A drive is one irreplaceable shot; ten
+        // seconds is the most of it worth risking.
+        assetWriter.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: Int(quality.size.width),
@@ -265,6 +318,7 @@ final class DriveRecorder: @unchecked Sendable {
         }
 
         writeManifest(dir: dir, pose: pose, quality: quality, note: note, capture: capture)
+        Self.keepScreenAwake(true)
 
         lock.withLock {
             _status = Status(recording: true, name: name, elapsed: 0,
@@ -279,13 +333,16 @@ final class DriveRecorder: @unchecked Sendable {
     func stop(completion: (@Sendable (URL?) -> Void)? = nil) {
         guard isRecording else { completion?(nil); return }
         lock.withLock { _status.recording = false }
+        Self.keepScreenAwake(false)
         queue.async {
             self.started = false
             let dir = self.directory
             [self.framesCSV, self.motionCSV, self.locationCSV,
-             self.altimeterCSV, self.anchorCSV, self.detectionLog].forEach { $0?.close() }
+             self.altimeterCSV, self.anchorCSV, self.detectionLog,
+             self.headingCSV, self.healthCSV].forEach { $0?.close() }
             self.framesCSV = nil; self.motionCSV = nil; self.locationCSV = nil
             self.altimeterCSV = nil; self.anchorCSV = nil; self.detectionLog = nil
+            self.headingCSV = nil; self.healthCSV = nil
 
             self.videoInput?.markAsFinished()
             self.writer?.finishWriting {

@@ -254,6 +254,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Periphery uses the rear camera to detect vehicles ahead. Video never leaves the phone.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Periphery uses speed and course to measure the camera's mount angle while you drive. Location never leaves the phone.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Periphery uses the motion sensors and the barometer to measure the camera's mount angle and the road grade.";
@@ -303,6 +304,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Periphery uses the rear camera to detect vehicles ahead. Video never leaves the phone.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Periphery uses speed and course to measure the camera's mount angle while you drive. Location never leaves the phone.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Periphery uses the motion sensors and the barometer to measure the camera's mount angle and the road grade.";

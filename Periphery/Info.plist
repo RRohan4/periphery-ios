@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Base plist. GENERATE_INFOPLIST_FILE stays on, so every INFOPLIST_KEY_*
+	     build setting still merges on top of this file; only the keys Xcode
+	     drops need to live here.
+
+	     UIFileSharingEnabled is one such key. Xcode 26 silently discards
+	     INFOPLIST_KEY_UIFileSharingEnabled from the generated plist. Every
+	     other INFOPLIST_KEY_* in this target survives, including its sibling
+	     LSSupportsOpeningDocumentsInPlace, which is what made the loss hard to
+	     see. Without UIFileSharingEnabled the Documents folder is invisible to
+	     Files and to iTunes File Sharing, so a recorded drive is stranded on
+	     the phone with no way off it. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+</dict>
+</plist>
