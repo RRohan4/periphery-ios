@@ -23,6 +23,7 @@ final class Preprocessor {
 
     /// Reusable [1, 3, 256, 512] float32 input.
     let input: MLMultiArray
+    private var inputScratch: [Float]
     private var scaled: vImage_Buffer
     private var planes: [vImage_Buffer]
     private var scaledWidth = 0
@@ -33,6 +34,8 @@ final class Preprocessor {
                                          NSNumber(value: Contract.inputHeight),
                                          NSNumber(value: Contract.inputWidth)],
                                  dataType: .float32)
+        inputScratch = [Float](repeating: 0,
+                               count: 3 * Contract.inputHeight * Contract.inputWidth)
         scaled = vImage_Buffer()
         planes = []
     }
@@ -82,7 +85,7 @@ final class Preprocessor {
         // Zero the canvas so the letterbox is exactly the normalised mean, then
         // write the three channels into their sub-rects in RGB order.
         let plane = Contract.inputWidth * Contract.inputHeight
-        try input.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in
+        try inputScratch.withUnsafeMutableBufferPointer { buffer in
             guard let canvas = buffer.baseAddress else { return }
             canvas.update(repeating: 0, count: 3 * plane)
             let sources = [red, green, blue]
@@ -108,6 +111,7 @@ final class Preprocessor {
                 }
             }
         }
+        try MLMultiArrayTransfer.writeFloats(inputScratch, to: input, named: "preprocessed image")
         return input
     }
 

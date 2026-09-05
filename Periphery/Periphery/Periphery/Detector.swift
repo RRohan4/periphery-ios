@@ -161,6 +161,11 @@ final class Detector {
         try Detector.readFloats(classes, into: &classScratch, "classes")
         try Detector.readFloats(boxes, into: &boxScratch, "boxes")
         try Detector.readFloats(directions, into: &directionScratch, "directions")
+        Detector.dumpTensors([Detector.describe(features, "backbone.features"),
+                              Detector.describe(volume, "head.input.volume"),
+                              Detector.describe(classes, "head.classes"),
+                              Detector.describe(boxes, "head.boxes"),
+                              Detector.describe(directions, "head.directions")])
         timing.head = Detector.seconds(since: mark)
 
         mark = DispatchTime.now()
@@ -208,27 +213,102 @@ final class Detector {
             throw DetectorError.unexpectedShape(
                 "\(what) has \(array.count) elements, expected \(destination.count)")
         }
-        let count = array.count
-        let source = array.dataPointer
-        switch array.dataType {
-        case .float32:
-            destination.withUnsafeMutableBufferPointer { buffer in
-                buffer.baseAddress!.update(from: source.assumingMemoryBound(to: Float.self),
-                                           count: count)
+        try MLMultiArrayTransfer.readFloats(array, into: &destination, named: what)
+    }
+
+    // MARK: - Raw tensor dump
+
+    /// Every tensor in the path, once per launch, written where Files can reach
+    /// it. This exists because of a specific failure: on-device the class head
+    /// scored 98.8% of its detections at EXACTLY 0.5, and sigmoid(0) = 0.5, so
+    /// the logits arriving at `Decode` were zero. The exported weights are not
+    /// zero -- the class biases are the usual focal-loss -3.9, which would put
+    /// background at 0.02 and produce no detections at all.
+    ///
+    /// The original failure was caused by copying `array.count` elements
+    /// straight off `dataPointer`. CoreML may hand back a padded tensor -- the
+    /// ANE pads to tile boundaries -- and `count` is the LOGICAL element count.
+    /// Transfers now walk the reported strides; this dump remains as the
+    /// device-side proof that the physical and logical layouts were identified.
+    ///
+    /// So this records `strides` against what dense packing would imply, and
+    /// samples each tensor BOTH ways. If the two readings differ, the transfer
+    /// is the bug and not the model.
+    static func describe(_ array: MLMultiArray, _ name: String,
+                         sample: Int = 24) -> [String: Any] {
+        let shape = array.shape.map { $0.intValue }
+        let strides = array.strides.map { $0.intValue }
+        let dense = MLMultiArrayTransfer.denseStrides(for: shape)
+        let isDense = strides == dense
+
+        func value(atOffset offset: Int) -> Float {
+            switch array.dataType {
+            case .float32:
+                return array.dataPointer.assumingMemoryBound(to: Float.self)[offset]
+            case .float16:
+                let bits = array.dataPointer.assumingMemoryBound(to: UInt16.self)[offset]
+                return Float(Float16(bitPattern: bits))
+            default:
+                return .nan
             }
-        case .float16:
-            var input = vImage_Buffer(data: source, height: 1,
-                                      width: vImagePixelCount(count), rowBytes: count * 2)
-            try destination.withUnsafeMutableBufferPointer { buffer in
-                var output = vImage_Buffer(data: buffer.baseAddress!, height: 1,
-                                           width: vImagePixelCount(count), rowBytes: count * 4)
-                guard vImageConvert_Planar16FtoPlanarF(&input, &output, 0) == kvImageNoError else {
-                    throw DetectorError.unsupportedDataType("\(what): float16 conversion failed")
-                }
-            }
-        default:
-            throw DetectorError.unsupportedDataType("\(what) is \(name(array.dataType))")
         }
+        // Logical index -> offset through the reported strides.
+        func strided(_ logical: Int) -> Float {
+            var remainder = logical, offset = 0
+            for axis in 0..<shape.count {
+                let index = (remainder / dense[axis]) % shape[axis]
+                remainder -= index * dense[axis]
+                offset += index * strides[axis]
+            }
+            return value(atOffset: offset)
+        }
+
+        let n = min(sample, array.count)
+        let linear = (0..<n).map { value(atOffset: $0) }
+        let viaStrides = (0..<n).map { strided($0) }
+        var linearZeros = 0
+        var logicalZeros = 0
+        for i in 0..<array.count {
+            if value(atOffset: i) == 0 { linearZeros += 1 }
+            if strided(i) == 0 { logicalZeros += 1 }
+        }
+
+        return [
+            "name": name,
+            "shape": shape,
+            "strides": strides,
+            "denseStrides": dense,
+            "isDenselyPacked": isDense,
+            "count": array.count,
+            "dataType": array.dataType == .float16 ? "float16"
+                      : array.dataType == .float32 ? "float32" : "other",
+            "zerosReadLinearly": linearZeros,
+            "fractionZeroLinearly": Double(linearZeros) / Double(max(array.count, 1)),
+            "zerosReadLogically": logicalZeros,
+            "fractionZeroLogically": Double(logicalZeros) / Double(max(array.count, 1)),
+            "firstLinear": linear.map { Double($0) },
+            "firstViaStrides": viaStrides.map { Double($0) },
+            "readingsAgree": linear == viaStrides,
+        ]
+    }
+
+    /// Written once per launch to Documents, next to the drives.
+    private static var dumpWritten = false
+
+    static func dumpTensors(_ entries: [[String: Any]]) {
+        guard !dumpWritten else { return }
+        dumpWritten = true
+        let payload: [String: Any] = [
+            "note": "Tensor transfers use reported strides. firstLinear is diagnostic only; "
+                  + "firstViaStrides is the logical order passed to decode. sigmoid(0)=0.5.",
+            "tensors": entries,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload,
+                                                     options: [.prettyPrinted, .sortedKeys]),
+              let dir = FileManager.default.urls(for: .documentDirectory,
+                                                 in: .userDomainMask).first
+        else { return }
+        try? data.write(to: dir.appendingPathComponent("head_dump.json"))
     }
 
     /// The reverse: a float32 buffer into an MLMultiArray of either precision.
@@ -239,28 +319,7 @@ final class Detector {
             throw DetectorError.unexpectedShape(
                 "\(what) wants \(array.count) elements, have \(source.count)")
         }
-        let count = array.count
-        let destination = array.dataPointer
-        switch array.dataType {
-        case .float32:
-            source.withUnsafeBufferPointer { buffer in
-                destination.assumingMemoryBound(to: Float.self)
-                    .update(from: buffer.baseAddress!, count: count)
-            }
-        case .float16:
-            try source.withUnsafeBufferPointer { buffer in
-                var input = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: buffer.baseAddress!),
-                                          height: 1, width: vImagePixelCount(count),
-                                          rowBytes: count * 4)
-                var output = vImage_Buffer(data: destination, height: 1,
-                                           width: vImagePixelCount(count), rowBytes: count * 2)
-                guard vImageConvert_PlanarFtoPlanar16F(&input, &output, 0) == kvImageNoError else {
-                    throw DetectorError.unsupportedDataType("\(what): float16 conversion failed")
-                }
-            }
-        default:
-            throw DetectorError.unsupportedDataType("\(what) is \(name(array.dataType))")
-        }
+        try MLMultiArrayTransfer.writeFloats(source, to: array, named: what)
     }
 
     // MARK: - CoreML plumbing

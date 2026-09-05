@@ -12,6 +12,7 @@
 //        --out ../periphery-ios/Resources
 
 import Foundation
+import CoreML
 import simd
 
 struct SelfCheck {
@@ -44,6 +45,8 @@ struct SelfCheck {
         results.append(checkDecode(bundle, manifest))
         results.append(checkMountAxes(calibration))
         results.append(checkFocusOfExpansion())
+        results.append(checkTensorTransfer(padded: false))
+        results.append(checkTensorTransfer(padded: true))
         return results
     }
 
@@ -58,6 +61,85 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    private static func checkTensorTransfer(padded: Bool) -> Result {
+        let shape = [2, 3]
+        let strides = padded ? [5, 1] : [3, 1]
+        let expected: [Float] = [-2, -0.5, 0, 1, 2.5, 7]
+        let label = padded ? "padded tensor transfer" : "dense tensor transfer"
+
+        do {
+            for type in [MLMultiArrayDataType.float32, .float16] {
+                let array = try makeTensor(shape: shape, strides: strides, dataType: type)
+                try MLMultiArrayTransfer.writeFloats(expected, to: array, named: label)
+                var actual = [Float](repeating: .nan, count: expected.count)
+                try MLMultiArrayTransfer.readFloats(array, into: &actual, named: label)
+                guard actual == expected else {
+                    return Result(name: label, passed: false,
+                                  detail: "\(type) round trip was \(actual)")
+                }
+
+                if padded {
+                    let untouched: Bool
+                    switch type {
+                    case .float32:
+                        let values = array.dataPointer.assumingMemoryBound(to: Float.self)
+                        untouched = values[3] == -99 && values[4] == -99
+                    case .float16:
+                        let values = array.dataPointer.assumingMemoryBound(to: UInt16.self)
+                        let sentinel = Float16(-99).bitPattern
+                        untouched = values[3] == sentinel && values[4] == sentinel
+                    default:
+                        untouched = false
+                    }
+                    guard untouched else {
+                        return Result(name: label, passed: false,
+                                      detail: "\(type) write modified row padding")
+                    }
+                }
+            }
+            return Result(name: label, passed: true,
+                          detail: "float32 + float16 logical read/write round trips")
+        } catch {
+            return Result(name: label, passed: false, detail: String(describing: error))
+        }
+    }
+
+    private static func makeTensor(shape: [Int], strides: [Int],
+                                   dataType: MLMultiArrayDataType) throws -> MLMultiArray {
+        let lastOffset = zip(shape, strides).reduce(0) { partial, axis in
+            partial + (axis.0 - 1) * axis.1
+        }
+        let physicalCount = lastOffset + 1
+        let bytesPerElement = dataType == .float16 ? 2 : 4
+        let pointer = UnsafeMutableRawPointer.allocate(
+            byteCount: physicalCount * bytesPerElement,
+            alignment: bytesPerElement)
+
+        switch dataType {
+        case .float32:
+            pointer.assumingMemoryBound(to: Float.self)
+                .initialize(repeating: -99, count: physicalCount)
+        case .float16:
+            pointer.assumingMemoryBound(to: UInt16.self)
+                .initialize(repeating: Float16(-99).bitPattern, count: physicalCount)
+        default:
+            pointer.deallocate()
+            throw DetectorError.unsupportedDataType("self-check \(dataType)")
+        }
+
+        do {
+            return try MLMultiArray(
+                dataPointer: pointer,
+                shape: shape.map { NSNumber(value: $0) },
+                dataType: dataType,
+                strides: strides.map { NSNumber(value: $0) },
+                deallocator: { $0.deallocate() })
+        } catch {
+            pointer.deallocate()
+            throw error
+        }
+    }
 
     /// Round-trip the focus-of-expansion inversion against the forward
     /// projection it inverts.

@@ -103,11 +103,10 @@ enum Benchmark {
                                              NSNumber(value: Contract.inputWidth)],
                                      dataType: .float32)
         var generator = SystemRandomNumberGenerator()
-        array.withUnsafeMutableBufferPointer(ofType: Float.self) { buffer, _ in
-            for i in buffer.indices {
-                buffer[i] = Float.random(in: -2.0...2.0, using: &generator)
-            }
+        let values = (0..<array.count).map { _ in
+            Float.random(in: -2.0...2.0, using: &generator)
         }
+        try MLMultiArrayTransfer.writeFloats(values, to: array, named: "benchmark image")
         return array
     }
 
