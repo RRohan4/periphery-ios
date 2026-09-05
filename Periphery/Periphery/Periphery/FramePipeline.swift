@@ -1,9 +1,10 @@
 //  FramePipeline.swift
-//  Camera -> preprocess -> detect, at whatever rate the phone holds.
+//  Live camera/motion adapter for the source-neutral PerceptionEngine.
 //
 //  Confined to the capture queue after `start()`. Only value types cross to the
 //  main actor, once per frame, for drawing. Nothing here keeps temporal state --
-//  each frame is independent, exactly as the contract says.
+//  each frame is independent, exactly as the contract says. Detector logic
+//  lives in PerceptionEngine and has no knowledge that this source is Live.
 //
 //  Split out of LiveView.swift, which had grown to hold the pipeline, the
 //  CoreMotion client, the renderer, the screen and the view model. This file is
@@ -71,9 +72,7 @@ final class FramePipeline: @unchecked Sendable {
     let motion = MotionSource()
     let recorder = DriveRecorder()
     let foe = FocusOfExpansion()
-    private var preprocessor: Preprocessor?
-    private var detector: Detector?
-    private var calibration: Calibration?
+    private var engine: PerceptionEngine?
     private var busy = false
     private var dropped = 0
     private var lastFrameTime: DispatchTime?
@@ -229,7 +228,7 @@ final class FramePipeline: @unchecked Sendable {
     func start() async throws {
         guard await CameraSession.requestAccess() else { throw CameraSession.CameraError.denied }
         try camera.configure()
-        preprocessor = try Preprocessor()
+        engine = try PerceptionEngine()
         startMotion()
         camera.onFrame = { [weak self] frame in self?.handle(frame) }
         camera.start()
@@ -341,7 +340,7 @@ final class FramePipeline: @unchecked Sendable {
         // Also ahead of the busy guard, and for the same reason: the estimator
         // wants an even sample of the drive, not whatever the detector happened
         // to leave time for. It drops its own frames internally.
-        if let calibration {
+        if let calibration = engine?.currentCalibration {
             foe.feed(frame: frame, calibration: calibration,
                      speed: motion.latestLocation?.speed ?? -1)
         }
@@ -387,62 +386,36 @@ final class FramePipeline: @unchecked Sendable {
         snapshot.focusHunting = camera.isAdjustingFocus
 
         do {
-            let calibration = try calibrate(with: frame)
-            let crop = calibration.focalMatchedCrop()
-            snapshot.focal = calibration.achievedFocal(crop)
-            snapshot.focalMatched = calibration.focalIsMatched(crop)
-            snapshot.visibleFraction = detector?.visibleVoxelFraction ?? 0
-            snapshot.guides = calibration.groundGuides()
+            guard let engine else { return }
+            let intrinsics = frame.intrinsics ?? Self.fallbackIntrinsics(
+                width: frame.width, height: frame.height)
+            let perceptionFrame = PerceptionFrame(
+                pixelBuffer: frame.pixelBuffer,
+                timestamp: CMTimeGetSeconds(frame.presentationTime),
+                intrinsics: intrinsics,
+                width: frame.width,
+                height: frame.height,
+                mountPose: pose)
+            let result = try engine.process(
+                frame: perceptionFrame,
+                configuration: PerceptionConfiguration(
+                    scoreThreshold: scoreThreshold,
+                    rejectImplausible: rejectImplausible))
+            let crop = result.calibration.crop
+            snapshot.focal = result.calibration.focal
+            snapshot.focalMatched = result.calibration.focalMatched
+            snapshot.visibleFraction = result.calibration.visibleVoxelFraction
+            snapshot.guides = result.calibration.guides
             snapshot.cropDescription = "\(crop.width)x\(crop.height) at (\(crop.x), \(crop.y))"
-
-            guard let preprocessor, let detector else { return }
-            var mark = DispatchTime.now()
-            let input = try preprocessor.fill(from: frame.pixelBuffer, crop: crop)
-            snapshot.preprocessMS = Self.ms(since: mark)
-
-            mark = DispatchTime.now()
-            snapshot.detections = try detector.detect(image: input,
-                                                      scoreThreshold: scoreThreshold,
-                                                      rejectImplausible: rejectImplausible)
-            snapshot.inferenceMS = Self.ms(since: mark)
+            snapshot.preprocessMS = result.timings.preprocessMS
+            snapshot.inferenceMS = result.timings.inferenceMS
+            snapshot.detections = result.rawDetections
             recorder.append(detections: snapshot.detections, at: frame.presentationTime)
         } catch {
             snapshot.note = String(describing: error)
         }
 
         onSnapshot?(snapshot)
-    }
-
-    /// Build (or refresh) the calibration for this frame. The LUT is rebuilt
-    /// only when the pose actually moves -- it depends on calibration, not on
-    /// the image, and rebuilding it per frame would be pure waste.
-    private func calibrate(with frame: CameraSession.Frame) throws -> Calibration {
-        let intrinsics = frame.intrinsics ?? Self.fallbackIntrinsics(width: frame.width,
-                                                                    height: frame.height)
-        let updated = Calibration(pose: pose,
-                                  K: intrinsics,
-                                  frameWidth: frame.width,
-                                  frameHeight: frame.height)
-        if let existing = calibration {
-            // ~0.03 deg on any axis. The LUT depends on the pose, not the
-            // image, so rebuilding it per frame would be pure waste.
-            let poseMoved = abs(existing.pitch - updated.pitch) > 0.0005
-                || abs(existing.roll - updated.roll) > 0.0005
-                || abs(existing.yaw - updated.yaw) > 0.0005
-                || abs(existing.height - updated.height) > 0.005
-            let opticsMoved = existing.K[0][0] != updated.K[0][0]
-                || existing.frameWidth != updated.frameWidth
-            if !poseMoved && !opticsMoved {
-                return existing
-            }
-        }
-        if detector == nil {
-            detector = try Detector(calibration: updated)
-        } else {
-            detector?.updateCalibration(updated)
-        }
-        calibration = updated
-        return updated
     }
 
     /// If intrinsic delivery is unavailable, assume a 60-degree horizontal
@@ -457,7 +430,4 @@ final class FramePipeline: @unchecked Sendable {
         ])
     }
 
-    private static func ms(since mark: DispatchTime) -> Double {
-        Double(DispatchTime.now().uptimeNanoseconds - mark.uptimeNanoseconds) / 1e6
-    }
 }
