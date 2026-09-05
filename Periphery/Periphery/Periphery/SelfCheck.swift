@@ -47,6 +47,7 @@ struct SelfCheck {
         results.append(checkFocusOfExpansion())
         results.append(checkTensorTransfer(padded: false))
         results.append(checkTensorTransfer(padded: true))
+        results.append(checkVehicleTracker(bundle))
         return results
     }
 
@@ -61,6 +62,89 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    private static func checkVehicleTracker(_ bundle: Bundle) -> Result {
+        guard let url = bundle.url(forResource: "tracker_selfcheck", withExtension: "json") else {
+            return Result(name: "vehicle tracker parity", passed: false,
+                          detail: "tracker_selfcheck.json missing from the bundle")
+        }
+        do {
+            let fixture = try JSONDecoder().decode(
+                TrackerFixture.self, from: Data(contentsOf: url))
+            let tracker = VehicleTracker()
+            var checkpoints = 0
+            var worst = 0.0
+
+            for (frameIndex, frame) in fixture.frames.enumerated() {
+                let detections = frame.detections.map {
+                    Detection(score: $0.score, label: $0.label,
+                              x: $0.x, y: $0.y, z: $0.z,
+                              length: $0.length, width: $0.width, height: $0.height,
+                              yaw: $0.yaw)
+                }
+                let actual = tracker.step(
+                    detections: detections,
+                    ego: EgoDelta(dx: frame.dx, dy: frame.dy,
+                                  dyaw: frame.dyaw, dt: frame.dt),
+                    timestamp: frame.t)
+                guard tracker.detectionSuppressed == frame.detectionSuppressed,
+                      tracker.trackSuppressed == frame.trackSuppressed,
+                      tracker.idsIssued == frame.idsIssued else {
+                    return Result(name: "vehicle tracker parity", passed: false,
+                                  detail: "counter mismatch at flagged frame \(frameIndex)")
+                }
+                guard let expected = frame.expected else { continue }
+                checkpoints += 1
+                guard actual.count == expected.count else {
+                    return Result(name: "vehicle tracker parity", passed: false,
+                                  detail: "frame \(frameIndex): \(actual.count) tracks, "
+                                        + "Python has \(expected.count)")
+                }
+                for (mine, python) in zip(actual, expected) {
+                    guard mine.id == python.id, mine.label == python.label,
+                          mine.hits == python.hits, mine.observed == python.observed,
+                          mine.state.rawValue == python.state,
+                          mine.headingSource.rawValue == python.headingSource else {
+                        return Result(name: "vehicle tracker parity", passed: false,
+                                      detail: "identity/state mismatch at frame \(frameIndex), "
+                                            + "Swift id \(mine.id), Python id \(python.id)")
+                    }
+                    let pairs = [
+                        (mine.x, python.x), (mine.y, python.y), (mine.z, python.z),
+                        (mine.length, python.length), (mine.width, python.width),
+                        (mine.height, python.height), (mine.modelYaw, python.modelYaw),
+                        (mine.yaw, python.yaw),
+                        (Double(mine.score), Double(python.score)),
+                    ]
+                    for pair in pairs { worst = max(worst, abs(pair.0 - pair.1)) }
+                    switch (mine.velocity, python.velocity) {
+                    case (nil, nil): break
+                    case let (mine?, python?):
+                        worst = max(worst, max(abs(mine.x - python[0]),
+                                               abs(mine.y - python[1])))
+                    default:
+                        return Result(name: "vehicle tracker parity", passed: false,
+                                      detail: "velocity readiness mismatch at frame \(frameIndex), "
+                                            + "id \(mine.id)")
+                    }
+                }
+            }
+            guard tracker.births == fixture.final.births,
+                  tracker.matches == fixture.final.matches,
+                  tracker.detectionSuppressed == fixture.final.detectionSuppressed,
+                  tracker.trackSuppressed == fixture.final.trackSuppressed,
+                  tracker.idsIssued == fixture.final.idsIssued else {
+                return Result(name: "vehicle tracker parity", passed: false,
+                              detail: "final counters differ from Python")
+            }
+            return Result(name: "vehicle tracker parity", passed: worst < 1e-5,
+                          detail: "\(fixture.frames.count) flagged frames, \(checkpoints) "
+                                + "checkpoints, max diff \(format(worst))")
+        } catch {
+            return Result(name: "vehicle tracker parity", passed: false,
+                          detail: String(describing: error))
+        }
+    }
 
     private static func checkTensorTransfer(padded: Bool) -> Result {
         let shape = [2, 3]
@@ -530,6 +614,90 @@ struct SelfCheck {
                                frameWidth: calibrationBlock.frameSize[0],
                                frameHeight: calibrationBlock.frameSize[1])
         }
+    }
+
+    private struct TrackerFixture: Decodable {
+        struct Final: Decodable {
+            let births, matches, detectionSuppressed, trackSuppressed, idsIssued: Int
+            enum CodingKeys: String, CodingKey {
+                case births, matches
+                case detectionSuppressed = "detection_suppressed"
+                case trackSuppressed = "track_suppressed"
+                case idsIssued = "ids_issued"
+            }
+        }
+
+        struct PackedDetection: Decodable {
+            let score: Float
+            let label: Int
+            let x, y, z, length, width, height, yaw: Double
+
+            init(from decoder: Decoder) throws {
+                var values = try decoder.unkeyedContainer()
+                score = try values.decode(Float.self)
+                label = try values.decode(Int.self)
+                x = try values.decode(Double.self); y = try values.decode(Double.self)
+                z = try values.decode(Double.self); length = try values.decode(Double.self)
+                width = try values.decode(Double.self); height = try values.decode(Double.self)
+                yaw = try values.decode(Double.self)
+            }
+        }
+
+        struct ExpectedTrack: Decodable {
+            let id: Int
+            let x, y, z, length, width, height, modelYaw, yaw: Double
+            let headingSource: String
+            let label: Int
+            let score: Float
+            let hits: Int
+            let observed: Bool
+            let state: String
+            let velocity: [Double]?
+
+            init(from decoder: Decoder) throws {
+                var values = try decoder.unkeyedContainer()
+                id = try values.decode(Int.self)
+                x = try values.decode(Double.self); y = try values.decode(Double.self)
+                z = try values.decode(Double.self); length = try values.decode(Double.self)
+                width = try values.decode(Double.self); height = try values.decode(Double.self)
+                modelYaw = try values.decode(Double.self); yaw = try values.decode(Double.self)
+                headingSource = try values.decode(String.self)
+                label = try values.decode(Int.self); score = try values.decode(Float.self)
+                hits = try values.decode(Int.self); observed = try values.decode(Bool.self)
+                state = try values.decode(String.self)
+                if try values.decodeNil() {
+                    velocity = nil
+                } else {
+                    velocity = try values.decode([Double].self)
+                }
+            }
+        }
+
+        struct Frame: Decodable {
+            let t, dx, dy, dyaw, dt: Double
+            let detections: [PackedDetection]
+            let detectionSuppressed, trackSuppressed, idsIssued: Int
+            let expected: [ExpectedTrack]?
+
+            init(from decoder: Decoder) throws {
+                var values = try decoder.unkeyedContainer()
+                t = try values.decode(Double.self); dx = try values.decode(Double.self)
+                dy = try values.decode(Double.self); dyaw = try values.decode(Double.self)
+                dt = try values.decode(Double.self)
+                detections = try values.decode([PackedDetection].self)
+                detectionSuppressed = try values.decode(Int.self)
+                trackSuppressed = try values.decode(Int.self)
+                idsIssued = try values.decode(Int.self)
+                if try values.decodeNil() {
+                    expected = nil
+                } else {
+                    expected = try values.decode([ExpectedTrack].self)
+                }
+            }
+        }
+
+        let frames: [Frame]
+        let final: Final
     }
 
     private static func format(_ value: Double) -> String {
