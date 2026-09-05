@@ -48,6 +48,7 @@ struct SelfCheck {
         results.append(checkTensorTransfer(padded: false))
         results.append(checkTensorTransfer(padded: true))
         results.append(checkVehicleTracker(bundle))
+        results.append(checkEgoMotionArc())
         return results
     }
 
@@ -62,6 +63,18 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    private static func checkEgoMotionArc() -> Result {
+        let straight = LiveEgoMotion.arcDelta(speed: 10, yawRate: 0, dt: 0.1)
+        let turn = LiveEgoMotion.arcDelta(speed: 12, yawRate: 0.2, dt: 0.5)
+        let expectedX = 12 * sin(0.1) / 0.2
+        let expectedY = 12 * (1 - cos(0.1)) / 0.2
+        let worst = [abs(straight.dx - 1), abs(straight.dy),
+                     abs(turn.dx - expectedX), abs(turn.dy - expectedY),
+                     abs(turn.dyaw - 0.1)].max() ?? .infinity
+        return Result(name: "ego-motion arc", passed: worst < 1e-12,
+                      detail: "straight + turning old-frame deltas, max diff \(format(worst))")
+    }
 
     private static func checkVehicleTracker(_ bundle: Bundle) -> Result {
         guard let url = bundle.url(forResource: "tracker_selfcheck", withExtension: "json") else {

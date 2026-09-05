@@ -8,6 +8,7 @@ struct EgoDelta {
     var dy: Double = 0
     var dyaw: Double = 0
     var dt: Double = 0
+    var valid: Bool = true
 }
 
 enum VehicleMotionState: String, Codable {

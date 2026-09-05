@@ -2,9 +2,9 @@
 //  Live camera/motion adapter for the source-neutral PerceptionEngine.
 //
 //  Confined to the capture queue after `start()`. Only value types cross to the
-//  main actor, once per frame, for drawing. Nothing here keeps temporal state --
-//  each frame is independent, exactly as the contract says. Detector logic
-//  lives in PerceptionEngine and has no knowledge that this source is Live.
+//  main actor, once per frame, for drawing. Sensor history here only adapts Live
+//  samples into a neutral ego delta; detector and tracker state live in
+//  PerceptionEngine, which has no knowledge that this source is Live.
 //
 //  Split out of LiveView.swift, which had grown to hold the pipeline, the
 //  CoreMotion client, the renderer, the screen and the view model. This file is
@@ -20,6 +20,7 @@ final class FramePipeline: @unchecked Sendable {
 
     struct Snapshot {
         var detections: [Detection] = []
+        var trackedObjects: [TrackedVehicle] = []
         var inferenceMS: Double = 0
         var preprocessMS: Double = 0
         var fps: Double = 0
@@ -73,6 +74,7 @@ final class FramePipeline: @unchecked Sendable {
     let recorder = DriveRecorder()
     let foe = FocusOfExpansion()
     private var engine: PerceptionEngine?
+    private let egoMotion = LiveEgoMotion()
     private var busy = false
     private var dropped = 0
     private var lastFrameTime: DispatchTime?
@@ -237,6 +239,8 @@ final class FramePipeline: @unchecked Sendable {
     func stop() {
         camera.stop()
         motion.stop()
+        engine?.resetTemporalState()
+        egoMotion.reset()
     }
 
     // MARK: Cold-start pose
@@ -244,6 +248,7 @@ final class FramePipeline: @unchecked Sendable {
     private func startMotion() {
         motion.onAttitude = { [weak self] attitude in
             guard let self else { return }
+            self.egoMotion.append(attitude: attitude)
             self.gravityPitch = attitude.gravityPitch
 
             // Heavy smoothing: this is the seconds-to-minutes timescale, and
@@ -300,6 +305,7 @@ final class FramePipeline: @unchecked Sendable {
             }
         }
         motion.onLocation = { [weak self] location in
+            self?.egoMotion.append(location: location)
             self?.recorder.append(location: location)
         }
         motion.onAltitude = { [weak self] altitude in
@@ -395,7 +401,8 @@ final class FramePipeline: @unchecked Sendable {
                 intrinsics: intrinsics,
                 width: frame.width,
                 height: frame.height,
-                mountPose: pose)
+                mountPose: pose,
+                egoMotion: egoMotion.delta(at: CMTimeGetSeconds(frame.presentationTime)))
             let result = try engine.process(
                 frame: perceptionFrame,
                 configuration: PerceptionConfiguration(
@@ -410,7 +417,8 @@ final class FramePipeline: @unchecked Sendable {
             snapshot.preprocessMS = result.timings.preprocessMS
             snapshot.inferenceMS = result.timings.inferenceMS
             snapshot.detections = result.rawDetections
-            recorder.append(detections: snapshot.detections, at: frame.presentationTime)
+            snapshot.trackedObjects = result.trackedObjects
+            recorder.append(result: result, at: frame.presentationTime)
         } catch {
             snapshot.note = String(describing: error)
         }

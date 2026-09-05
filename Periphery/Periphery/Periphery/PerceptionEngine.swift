@@ -17,6 +17,7 @@ struct PerceptionFrame {
     let width: Int
     let height: Int
     let mountPose: MountPose
+    let egoMotion: EgoDelta
 }
 
 struct PerceptionConfiguration {
@@ -41,22 +42,25 @@ struct PerceptionCalibrationSnapshot {
 struct PerceptionDiagnostics {
     /// Actual Core ML boundary precisions selected on this device.
     var tensorPrecision: String
+    var temporalReset: Bool
 }
 
 struct PerceptionResult {
     var timestamp: TimeInterval
     var rawDetections: [Detection]
+    var trackedObjects: [TrackedVehicle]
+    var egoMotion: EgoDelta
     var calibration: PerceptionCalibrationSnapshot
     var timings: PerceptionTimings
     var diagnostics: PerceptionDiagnostics
 }
 
-/// Stateful only because Core ML buffers and the calibration LUT are reused.
-/// Temporal vehicle state does not enter until the tracker commit.
 final class PerceptionEngine {
     private let preprocessor: Preprocessor
     private var detector: Detector?
     private(set) var currentCalibration: Calibration?
+    private let tracker = VehicleTracker()
+    private var lastTimestamp: Double?
 
     init() throws {
         preprocessor = try Preprocessor()
@@ -82,9 +86,21 @@ final class PerceptionEngine {
             rejectImplausible: configuration.rejectImplausible)
         let inferenceMS = Self.ms(since: mark)
 
+        let frameInterval = lastTimestamp.map { frame.timestamp - $0 }
+        let discontinuous = !frame.timestamp.isFinite
+            || !frame.egoMotion.valid
+            || frameInterval.map { $0 <= 0 || $0 > 1
+                || abs(frame.egoMotion.dt - $0) > 0.02 } ?? true
+        if discontinuous { tracker.reset() }
+        let ego = discontinuous ? EgoDelta(dt: 0) : frame.egoMotion
+        let tracked = tracker.step(detections: detections, ego: ego, timestamp: frame.timestamp)
+        lastTimestamp = frame.timestamp
+
         return PerceptionResult(
             timestamp: frame.timestamp,
             rawDetections: detections,
+            trackedObjects: tracked,
+            egoMotion: ego,
             calibration: PerceptionCalibrationSnapshot(
                 calibration: calibration,
                 crop: crop,
@@ -96,7 +112,13 @@ final class PerceptionEngine {
                 preprocessMS: preprocessMS,
                 inferenceMS: inferenceMS),
             diagnostics: PerceptionDiagnostics(
-                tensorPrecision: detector.precisionNote))
+                tensorPrecision: detector.precisionNote,
+                temporalReset: discontinuous))
+    }
+
+    func resetTemporalState() {
+        tracker.reset()
+        lastTimestamp = nil
     }
 
     /// Rebuild the LUT only when its calibration inputs move. This preserves

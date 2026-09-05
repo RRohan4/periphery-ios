@@ -28,6 +28,7 @@
 //        health.csv         thermal state, fps and drops, once a second
 //        anchors.csv        wall clock against boot clock, every 60 s
 //        detections.jsonl   what the on-device model saw, per frame
+//        tracks-v1.jsonl    versioned tracked state, velocity, trail and ego delta
 //
 //  Two things recording must not do. It must not block the capture queue: the
 //  writer runs on its own serial queue and a dropped RECORDING frame is
@@ -123,6 +124,7 @@ final class DriveRecorder: @unchecked Sendable {
     private var healthCSV: CSVWriter?
     private var lastHealth: Double = 0
     private var detectionLog: CSVWriter?
+    private var trackedLog: CSVWriter?
 
     private let lock = NSLock()
     private var _status = Status()
@@ -315,6 +317,8 @@ final class DriveRecorder: @unchecked Sendable {
                 header: "t,thermal,frames,dropped,low_power")
             self.detectionLog = CSVWriter(dir.appendingPathComponent("detections.jsonl"),
                 header: nil)
+            self.trackedLog = CSVWriter(dir.appendingPathComponent("tracks-v1.jsonl"),
+                header: nil)
         }
 
         writeManifest(dir: dir, pose: pose, quality: quality, note: note, capture: capture)
@@ -339,9 +343,10 @@ final class DriveRecorder: @unchecked Sendable {
             let dir = self.directory
             [self.framesCSV, self.motionCSV, self.locationCSV,
              self.altimeterCSV, self.anchorCSV, self.detectionLog,
-             self.headingCSV, self.healthCSV].forEach { $0?.close() }
+             self.trackedLog, self.headingCSV, self.healthCSV].forEach { $0?.close() }
             self.framesCSV = nil; self.motionCSV = nil; self.locationCSV = nil
             self.altimeterCSV = nil; self.anchorCSV = nil; self.detectionLog = nil
+            self.trackedLog = nil
             self.headingCSV = nil; self.healthCSV = nil
 
             self.videoInput?.markAsFinished()
@@ -487,6 +492,39 @@ final class DriveRecorder: @unchecked Sendable {
         }
     }
 
+    /// Raw detector output remains in detections.jsonl. Temporal output is a
+    /// separately versioned stream so association never obscures model truth.
+    func append(result: PerceptionResult, at pts: CMTime) {
+        append(detections: result.rawDetections, at: pts)
+        guard isRecording else { return }
+        queue.async {
+            let rows = result.trackedObjects.map { track in
+                let velocity = track.velocity.map {
+                    "[\(Self.f($0.x, 3)),\(Self.f($0.y, 3))]"
+                } ?? "null"
+                let trail = track.trail.map {
+                    "[\(Self.f($0.timestamp, 6)),\(Self.f($0.x, 3)),\(Self.f($0.y, 3))]"
+                }.joined(separator: ",")
+                return "{\"id\":\(track.id),\"x\":\(Self.f(track.x, 3)),"
+                    + "\"y\":\(Self.f(track.y, 3)),\"z\":\(Self.f(track.z, 3)),"
+                    + "\"l\":\(Self.f(track.length, 3)),\"w\":\(Self.f(track.width, 3)),"
+                    + "\"h\":\(Self.f(track.height, 3)),\"yaw\":\(Self.f(track.yaw, 4)),"
+                    + "\"yaw_model\":\(Self.f(track.modelYaw, 4)),\"label\":\(track.label),"
+                    + "\"score\":\(Self.f(Double(track.score), 4)),\"hits\":\(track.hits),"
+                    + "\"observed\":\(track.observed),\"age_s\":\(Self.f(track.ageSeconds, 3)),"
+                    + "\"state\":\"\(track.state.rawValue)\","
+                    + "\"heading_source\":\"\(track.headingSource.rawValue)\",\"v\":\(velocity),"
+                    + "\"trail\":[\(trail)]}"
+            }.joined(separator: ",")
+            let ego = result.egoMotion
+            self.trackedLog?.line(
+                "{\"schema\":1,\"pts\":\(Self.f(CMTimeGetSeconds(pts), 6)),"
+                + "\"ego\":[\(Self.f(ego.dx, 6)),\(Self.f(ego.dy, 6)),"
+                + "\(Self.f(ego.dyaw, 7)),\(Self.f(ego.dt, 6))],"
+                + "\"reset\":\(result.diagnostics.temporalReset),\"tracks\":[\(rows)]}")
+        }
+    }
+
     // MARK: - Housekeeping, on the writer queue
 
     /// Clock anchors every 60 s and a free-space check every 10 s.
@@ -581,6 +619,7 @@ final class DriveRecorder: @unchecked Sendable {
         manifest["score_threshold"] = Contract.scoreThreshold
         manifest["nms_radius_m"] = Contract.nmsRadius
         manifest["class_names"] = Contract.classNames
+        manifest["tracked_results_schema"] = 1
         write(manifest, to: dir.appendingPathComponent("manifest.json"))
     }
 
