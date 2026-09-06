@@ -17,8 +17,46 @@ struct ReplayProgress: Sendable {
     var completed: Int
     var total: Int
     var latest: ReplayFrameSummary
-    var preprocessMS: Double
-    var inferenceMS: Double
+    /// The most recent frame's timings.
+    var timings: PerceptionTimings
+    /// Running mean over the run so far, excluding the first frame.
+    ///
+    /// A single frame's timing is too noisy to apportion a budget with, and the
+    /// FIRST frame is not a sample at all -- it carries model load and the ANE's
+    /// first-run compilation. Read `mean`, not `timings`, when asking where the
+    /// time goes.
+    var mean: PerceptionTimings
+
+    var preprocessMS: Double { timings.preprocessMS }
+    var inferenceMS: Double { timings.inferenceMS }
+}
+
+/// Incremental per-stage mean. Holds sums rather than samples so a 20,000-frame
+/// replay does not accumulate an array it never reads.
+private struct TimingAccumulator {
+    private var total = PerceptionTimings(preprocessMS: 0, inferenceMS: 0)
+    private(set) var count = 0
+
+    mutating func add(_ t: PerceptionTimings) {
+        total.preprocessMS += t.preprocessMS
+        total.inferenceMS += t.inferenceMS
+        total.backboneMS += t.backboneMS
+        total.gatherMS += t.gatherMS
+        total.headMS += t.headMS
+        total.decodeMS += t.decodeMS
+        count += 1
+    }
+
+    var mean: PerceptionTimings {
+        guard count > 0 else { return total }
+        let n = Double(count)
+        return PerceptionTimings(preprocessMS: total.preprocessMS / n,
+                                 inferenceMS: total.inferenceMS / n,
+                                 backboneMS: total.backboneMS / n,
+                                 gatherMS: total.gatherMS / n,
+                                 headMS: total.headMS / n,
+                                 decodeMS: total.decodeMS / n)
+    }
 }
 
 final class ReplayProcessor: @unchecked Sendable {
@@ -105,8 +143,8 @@ final class ReplayProcessor: @unchecked Sendable {
         var rateIndex = 0
         var speedIndex = 0
         var frameIndex = 0
-        var latestPreprocessMS = 0.0
-        var latestInferenceMS = 0.0
+        var latestTimings = PerceptionTimings(preprocessMS: 0, inferenceMS: 0)
+        var accumulator = TimingAccumulator()
 
         while let sample = output.copyNextSampleBuffer() {
             // Core ML and AVFoundation return autoreleased objects on every frame.
@@ -141,13 +179,15 @@ final class ReplayProcessor: @unchecked Sendable {
                 summaries.append(summary)
                 try line(Self.encode(result: result, summary: summary), to: file)
                 frameIndex += 1
-                latestPreprocessMS = result.timings.preprocessMS
-                latestInferenceMS = result.timings.inferenceMS
+                latestTimings = result.timings
+                // frameIndex has already been incremented, so this skips frame 1 --
+                // the one carrying model load and ANE compilation.
+                if frameIndex > 1 { accumulator.add(result.timings) }
                 if frameIndex.isMultiple(of: 10) {
                     progress(ReplayProgress(completed: frameIndex, total: rows.count,
                                             latest: summary,
-                                            preprocessMS: result.timings.preprocessMS,
-                                            inferenceMS: result.timings.inferenceMS))
+                                            timings: result.timings,
+                                            mean: accumulator.mean))
                 }
             }
         }
@@ -165,8 +205,8 @@ final class ReplayProcessor: @unchecked Sendable {
         if let latest = summaries.last {
             progress(ReplayProgress(completed: frameIndex, total: frameIndex,
                                     latest: latest,
-                                    preprocessMS: latestPreprocessMS,
-                                    inferenceMS: latestInferenceMS))
+                                    timings: latestTimings,
+                                    mean: accumulator.mean))
         }
         return summaries
     }
@@ -287,10 +327,16 @@ final class ReplayProcessor: @unchecked Sendable {
         try file.write(contentsOf: Data((text + "\n").utf8))
     }
 
+    /// `timing_ms_fields` names the positions in each frame's `timing_ms`, so the
+    /// file stays self-describing as stages are added. Timings are the one part of
+    /// a sidecar that is NOT reproducible; nothing comparing two replays for
+    /// determinism should read them.
     private static func header(checkpoint: String) -> String {
         "{\"schema\":1,\"kind\":\"periphery-replay\",\"checkpoint\":\"\(checkpoint)\","
             + "\"tracker\":\"safety40-tracker-v1\",\"score_threshold\":0.5,"
-            + "\"reject_implausible\":true,\"units\":\"SI\"}"
+            + "\"reject_implausible\":true,\"units\":\"SI\","
+            + "\"timing_ms_fields\":[\"preprocess\",\"inference\","
+            + "\"backbone\",\"gather\",\"head\",\"decode\"]}"
     }
 
     private static func encode(result: PerceptionResult, summary: ReplayFrameSummary) -> String {
@@ -309,7 +355,9 @@ final class ReplayProcessor: @unchecked Sendable {
         return "{\"index\":\(summary.index),\"pts\":\(summary.timestamp),"
             + "\"raw_count\":\(summary.rawCount),\"track_count\":\(summary.trackCount),"
             + "\"ego\":[\(ego.dx),\(ego.dy),\(ego.dyaw),\(ego.dt)],"
-            + "\"timing_ms\":[\(result.timings.preprocessMS),\(result.timings.inferenceMS)],"
+            + "\"timing_ms\":[\(result.timings.preprocessMS),\(result.timings.inferenceMS),"
+            + "\(result.timings.backboneMS),\(result.timings.gatherMS),"
+            + "\(result.timings.headMS),\(result.timings.decodeMS)],"
             + "\"calibration\":{\"focal\":\(calibration.focal),"
             + "\"crop\":[\(calibration.crop.x),\(calibration.crop.y),"
             + "\(calibration.crop.width),\(calibration.crop.height)],"

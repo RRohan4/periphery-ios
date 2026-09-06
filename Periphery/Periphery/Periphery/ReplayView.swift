@@ -24,6 +24,7 @@ struct ReplayView: View {
                                 .font(.system(.caption, design: .monospaced))
                             Text(model.rateLine).font(.system(.caption2, design: .monospaced))
                             Text(model.pipelineLine).font(.system(.caption2, design: .monospaced))
+                            Text(model.stageLine).font(.system(.caption2, design: .monospaced))
                             Text("thermal · \(model.thermal)")
                                 .font(.system(.caption2, design: .monospaced))
                                 .foregroundStyle(model.thermal == "nominal"
@@ -72,6 +73,9 @@ final class ReplayModel: ObservableObject {
     @Published var message: String?
     @Published var rateLine = "starting…"
     @Published var pipelineLine = "waiting for first frame…"
+    /// The per-stage split of `inferenceMS`. Separate line because it is the one
+    /// that says WHICH stage is slow, which is the whole point of showing it.
+    @Published var stageLine = "—"
     @Published var thermal = "nominal"
     @Published var memoryLine = "available memory —"
     private var processor: ReplayProcessor?
@@ -93,7 +97,7 @@ final class ReplayModel: ObservableObject {
         let worker = ReplayProcessor(); processor = worker; processing = true; progress = 0
         processedFrames = 0; totalFrames = 0
         replayStarted = Date(); rateLine = "starting…"
-        pipelineLine = "waiting for first frame…"; thermal = "nominal"
+        pipelineLine = "waiting for first frame…"; stageLine = "—"; thermal = "nominal"
         memoryLine = "available memory —"
         LiveSession.shared.pipeline.suspendForReplay()
         priorIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
@@ -115,6 +119,15 @@ final class ReplayModel: ObservableObject {
                             format: "latest raw %d · tracked %d · pre %.1f ms · inference %.1f ms",
                             update.latest.rawCount, update.latest.trackCount,
                             update.preprocessMS, update.inferenceMS)
+                        // The split inference is actually made of, averaged over the
+                        // run so far rather than sampled from one frame. `other` is
+                        // the part of inference no stage claims -- the image
+                        // precision conversion ahead of the first stage mark.
+                        let t = update.mean
+                        self.stageLine = String(
+                            format: "mean · backbone %.1f · gather %.1f · head %.1f "
+                                  + "· decode %.1f · other %.1f ms",
+                            t.backboneMS, t.gatherMS, t.headMS, t.decodeMS, t.unaccountedMS)
                         self.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
                         self.memoryLine = String(
                             format: "available memory %.0f MB",
