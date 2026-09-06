@@ -1,4 +1,5 @@
 import Combine
+import os
 import SwiftUI
 import UIKit
 
@@ -27,6 +28,8 @@ struct ReplayView: View {
                                 .font(.system(.caption2, design: .monospaced))
                                 .foregroundStyle(model.thermal == "nominal"
                                     ? Color.secondary : Color.orange)
+                            Text(model.memoryLine)
+                                .font(.system(.caption2, design: .monospaced))
                             Text("Keep Replay open. Auto-lock is disabled during this run.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -70,6 +73,7 @@ final class ReplayModel: ObservableObject {
     @Published var rateLine = "starting…"
     @Published var pipelineLine = "waiting for first frame…"
     @Published var thermal = "nominal"
+    @Published var memoryLine = "available memory —"
     private var processor: ReplayProcessor?
     private var playTask: Task<Void, Never>?
     private var replayStarted = Date()
@@ -90,6 +94,7 @@ final class ReplayModel: ObservableObject {
         processedFrames = 0; totalFrames = 0
         replayStarted = Date(); rateLine = "starting…"
         pipelineLine = "waiting for first frame…"; thermal = "nominal"
+        memoryLine = "available memory —"
         LiveSession.shared.pipeline.suspendForReplay()
         priorIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
         UIApplication.shared.isIdleTimerDisabled = true
@@ -111,6 +116,9 @@ final class ReplayModel: ObservableObject {
                             update.latest.rawCount, update.latest.trackCount,
                             update.preprocessMS, update.inferenceMS)
                         self.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
+                        self.memoryLine = String(
+                            format: "available memory %.0f MB",
+                            Double(os_proc_available_memory()) / 1_048_576.0)
                     }
                 }
                 await MainActor.run {

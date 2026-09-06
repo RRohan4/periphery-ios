@@ -109,38 +109,46 @@ final class ReplayProcessor: @unchecked Sendable {
         var latestInferenceMS = 0.0
 
         while let sample = output.copyNextSampleBuffer() {
-            if lock.withLock({ cancelled }) { reader.cancelReading(); throw ReplayError.cancelled }
-            guard let pixel = CMSampleBufferGetImageBuffer(sample) else { continue }
-            let videoPTS = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-            if firstVideoPTS == nil {
-                firstVideoPTS = videoPTS
-                videoToRecorded = rows[0].pts - videoPTS
-            }
-            let recordedPTS = videoPTS + videoToRecorded
-            let metadata = nearestFrame(to: recordedPTS, rows: rows)
-            let ego = egoDelta(from: previousRecordedPTS, to: metadata.pts,
-                               rates: rates, speeds: speeds,
-                               rateIndex: &rateIndex, speedIndex: &speedIndex)
-            previousRecordedPTS = metadata.pts
-            let intrinsics = metadata.K ?? Self.fallbackIntrinsics(
-                width: metadata.width, height: metadata.height)
-            let result = try engine.process(frame: PerceptionFrame(
-                pixelBuffer: pixel, timestamp: metadata.pts, intrinsics: intrinsics,
-                width: metadata.width, height: metadata.height,
-                mountPose: pose, egoMotion: ego))
-            let summary = ReplayFrameSummary(index: frameIndex, timestamp: metadata.pts,
-                                             rawCount: result.rawDetections.count,
-                                             trackCount: result.trackedObjects.count)
-            summaries.append(summary)
-            try line(Self.encode(result: result, summary: summary), to: file)
-            frameIndex += 1
-            latestPreprocessMS = result.timings.preprocessMS
-            latestInferenceMS = result.timings.inferenceMS
-            if frameIndex.isMultiple(of: 10) {
-                progress(ReplayProgress(completed: frameIndex, total: rows.count,
-                                        latest: summary,
-                                        preprocessMS: result.timings.preprocessMS,
-                                        inferenceMS: result.timings.inferenceMS))
+            // Core ML and AVFoundation return autoreleased objects on every frame.
+            // A replay has no run-loop boundary to drain them, so without this pool
+            // tensors accumulate for thousands of frames until iOS jetsams the app.
+            try autoreleasepool {
+                if lock.withLock({ cancelled }) {
+                    reader.cancelReading()
+                    throw ReplayError.cancelled
+                }
+                guard let pixel = CMSampleBufferGetImageBuffer(sample) else { return }
+                let videoPTS = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                if firstVideoPTS == nil {
+                    firstVideoPTS = videoPTS
+                    videoToRecorded = rows[0].pts - videoPTS
+                }
+                let recordedPTS = videoPTS + videoToRecorded
+                let metadata = nearestFrame(to: recordedPTS, rows: rows)
+                let ego = egoDelta(from: previousRecordedPTS, to: metadata.pts,
+                                   rates: rates, speeds: speeds,
+                                   rateIndex: &rateIndex, speedIndex: &speedIndex)
+                previousRecordedPTS = metadata.pts
+                let intrinsics = metadata.K ?? Self.fallbackIntrinsics(
+                    width: metadata.width, height: metadata.height)
+                let result = try engine.process(frame: PerceptionFrame(
+                    pixelBuffer: pixel, timestamp: metadata.pts, intrinsics: intrinsics,
+                    width: metadata.width, height: metadata.height,
+                    mountPose: pose, egoMotion: ego))
+                let summary = ReplayFrameSummary(index: frameIndex, timestamp: metadata.pts,
+                                                 rawCount: result.rawDetections.count,
+                                                 trackCount: result.trackedObjects.count)
+                summaries.append(summary)
+                try line(Self.encode(result: result, summary: summary), to: file)
+                frameIndex += 1
+                latestPreprocessMS = result.timings.preprocessMS
+                latestInferenceMS = result.timings.inferenceMS
+                if frameIndex.isMultiple(of: 10) {
+                    progress(ReplayProgress(completed: frameIndex, total: rows.count,
+                                            latest: summary,
+                                            preprocessMS: result.timings.preprocessMS,
+                                            inferenceMS: result.timings.inferenceMS))
+                }
             }
         }
         guard reader.status == .completed else {
