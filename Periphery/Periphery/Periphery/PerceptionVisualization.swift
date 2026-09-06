@@ -103,6 +103,11 @@ struct PerceptionSplitView<CameraContent: View>: View {
     let sourceLabel: String
     let cameraContent: CameraContent
 
+    /// Coasting remains tracker-internal so a brief miss can recover the same
+    /// ID. The rider display only presents boxes supported by the current
+    /// image; predicted motion after an object leaves view is not evidence.
+    private var displayedObjects: [TrackedVehicle] { objects.filter(\.observed) }
+
     init(objects: [TrackedVehicle], calibration: PerceptionCalibrationSnapshot?,
          egoSpeed: Double, sourceLabel: String,
          @ViewBuilder cameraContent: () -> CameraContent) {
@@ -118,12 +123,14 @@ struct PerceptionSplitView<CameraContent: View>: View {
             let gap = 8.0
             let cameraWidth = max(geometry.size.width * 0.38, 260)
             HStack(spacing: gap) {
-                WorldView(objects: objects,
+                WorldView(objects: displayedObjects,
                           focal: calibration?.focal ?? Contract.trainedFocal,
                           egoSpeed: egoSpeed)
                 VStack(spacing: gap) {
                     cameraContent
-                        .overlay { CameraBoxOverlay(objects: objects, calibration: calibration) }
+                        .overlay {
+                            CameraBoxOverlay(objects: displayedObjects, calibration: calibration)
+                        }
                         .aspectRatio(2.0, contentMode: .fill)
                         .frame(width: cameraWidth)
                         .clipped()
@@ -155,7 +162,7 @@ struct PerceptionSplitView<CameraContent: View>: View {
             Text("KM/H")
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.55))
-            Text("\(objects.count) TRACKED")
+            Text("\(displayedObjects.count) OBSERVED")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.55))
         }
