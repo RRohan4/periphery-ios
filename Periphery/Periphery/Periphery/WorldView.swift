@@ -300,6 +300,9 @@ struct WorldView: View {
     /// number reaches the only place that uses it without threading it through
     /// every containing view.
     @AppStorage(WorldFraming.key) private var tiltDegrees: Double = WorldFraming.defaultTilt
+    /// Presentation-only lateral camera correction. Zero preserves the live
+    /// view's existing origin; replay supplies its temporary demo offset.
+    var cameraRight: Double = 0
 
     var body: some View {
         Canvas { context, size in
@@ -329,10 +332,10 @@ struct WorldView: View {
         }
         // What the network can actually see, from the LIVE focal.
         let hfov = 2 * atan(Double(Contract.inputWidth) / (2 * max(focal, 1)))
-        var wedge = [SIMD3<Double>(0, 0, 0.03)]
+        var wedge = [SIMD3<Double>(0, -cameraRight, 0.03)]
         for i in 0...24 {
             let a = -hfov / 2 + hfov * Double(i) / 24
-            wedge.append(SIMD3<Double>(40 * cos(a), 40 * sin(a), 0.03))
+            wedge.append(SIMD3<Double>(40 * cos(a), -cameraRight + 40 * sin(a), 0.03))
         }
         if var path = camera.path(wedge) {
             path.closeSubpath()

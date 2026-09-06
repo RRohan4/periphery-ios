@@ -120,24 +120,28 @@ struct CameraBoxOverlay: View {
                              projected.y / projected.z)
     }
 
-    /// A coast is presentable only while the predicted box still overlaps the
-    /// pixels the detector actually saw. This distinguishes a temporary visual
-    /// occlusion (wiper, glare, another car) from an object that left the lens.
-    static func remainsInInferenceView(_ object: TrackedVehicle,
-                                       snapshot: PerceptionCalibrationSnapshot,
-                                       cameraRight: Double = 0) -> Bool {
-        let points = projectedCorners(object, calibration: snapshot.calibration,
-                                      cameraRight: cameraRight)
-        guard points.count == 8,
-              let minX = points.map(\.x).min(), let maxX = points.map(\.x).max(),
-              let minY = points.map(\.y).min(), let maxY = points.map(\.y).max()
-        else { return false }
-        let box = CGRect(x: minX, y: minY,
-                         width: max(maxX - minX, 1), height: max(maxY - minY, 1))
-        let crop = snapshot.crop
-        let inferenceRegion = CGRect(x: crop.x, y: crop.y,
-                                     width: crop.width, height: crop.height)
-        return box.intersects(inferenceRegion)
+    /// Presentation-only line-of-sight test. The BEV radar is a forward FOV
+    /// sector, so an object is drawable while any part of its footprint remains
+    /// inside that same angular arc. This deliberately does not alter tracking.
+    static func remainsInFieldOfViewArc(_ object: TrackedVehicle,
+                                        focal: Double,
+                                        cameraRight: Double = 0) -> Bool {
+        let halfFOV = atan(Double(Contract.inputWidth) / (2 * max(focal, 1)))
+        let cameraY = -cameraRight
+        let c = cos(object.yaw), s = sin(object.yaw)
+        let footprint = [SIMD2(0.5, 0.5), SIMD2(0.5, -0.5),
+                         SIMD2(-0.5, -0.5), SIMD2(-0.5, 0.5)]
+
+        return footprint.contains { p in
+            let localX = p.x * object.length, localY = p.y * object.width
+            let x = object.x + localX * c - localY * s
+            let y = object.y + localX * s + localY * c
+            let forward = x
+            let left = y - cameraY
+            let range = hypot(forward, left)
+            return forward > 0 && range <= 40.0
+                && abs(atan2(left, forward)) <= halfFOV
+        }
     }
 }
 
@@ -150,16 +154,15 @@ struct PerceptionSplitView<CameraContent: View>: View {
     let cameraRight: Double
     let cameraContent: CameraContent
 
-    /// Show a brief coast for an object that should still be visible (for
-    /// example behind a windshield wiper), but not after its predicted box has
-    /// actually left the detector's image region. Tracker state is retained in
-    /// both cases; this is only the presentation boundary.
+    /// Show an object only while its footprint remains inside the camera's
+    /// forward field-of-view arc. Tracker state is retained either way; this
+    /// is only the presentation boundary.
     private var displayedObjects: [TrackedVehicle] {
         objects.filter { object in
-            if object.observed { return true }
-            guard let calibration else { return false }
-            return CameraBoxOverlay.remainsInInferenceView(object, snapshot: calibration,
-                                                           cameraRight: cameraRight)
+            guard let calibration else { return object.observed }
+            return CameraBoxOverlay.remainsInFieldOfViewArc(object,
+                                                            focal: calibration.focal,
+                                                            cameraRight: cameraRight)
         }
     }
 
@@ -180,7 +183,8 @@ struct PerceptionSplitView<CameraContent: View>: View {
             HStack(spacing: gap) {
                 WorldView(objects: displayedObjects,
                           focal: calibration?.focal ?? Contract.trainedFocal,
-                          egoSpeed: egoSpeed)
+                          egoSpeed: egoSpeed,
+                          cameraRight: cameraRight)
                 VStack(spacing: gap) {
                     cameraContent
                         .overlay {
