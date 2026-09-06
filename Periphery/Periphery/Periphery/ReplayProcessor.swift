@@ -13,6 +13,13 @@ struct ReplayFrameSummary: Codable, Sendable {
     var trackCount: Int
 }
 
+struct ReplayDisplayFrame {
+    var summary: ReplayFrameSummary
+    var objects: [TrackedVehicle]
+    var calibration: PerceptionCalibrationSnapshot?
+    var egoSpeed: Double
+}
+
 struct ReplayProgress: Sendable {
     var completed: Int
     var total: Int
@@ -231,6 +238,94 @@ final class ReplayProcessor: @unchecked Sendable {
         }
     }
 
+    /// Decode the presentation fields from a completed sidecar. This is a UI
+    /// adapter only: it never re-runs or alters tracker decisions.
+    static func loadDisplayFrames(drive: URL) -> [ReplayDisplayFrame] {
+        guard let sidecar = try? String(contentsOf: sidecarURL(for: drive), encoding: .utf8),
+              let frameCSV = try? String(contentsOf: drive.appendingPathComponent("frames.csv"),
+                                         encoding: .utf8) else { return [] }
+        let metadata = frameCSV.split(separator: "\n").dropFirst().compactMap { row
+            -> (Double, simd_double3x3, Int, Int)? in
+            let fields = row.split(separator: ",", omittingEmptySubsequences: false)
+            guard fields.count >= 12, let pts = Double(fields[0]),
+                  let width = Int(fields[10]), let height = Int(fields[11]),
+                  let K = intrinsics(fromRowMajorValues: fields[1...9].compactMap { Double($0) })
+            else { return nil }
+            return (pts, K, width, height)
+        }
+        return sidecar.split(separator: "\n").dropFirst().enumerated().compactMap { index, row in
+            guard index < metadata.count, let data = row.data(using: .utf8),
+                  let decoded = try? JSONSerialization.jsonObject(with: data),
+                  let object = decoded as? [String: Any],
+                  let frameIndex = (object["index"] as? NSNumber)?.intValue,
+                  let pts = (object["pts"] as? NSNumber)?.doubleValue,
+                  let rawCount = (object["raw_count"] as? NSNumber)?.intValue,
+                  let trackCount = (object["track_count"] as? NSNumber)?.intValue else { return nil }
+            let summary = ReplayFrameSummary(index: frameIndex, timestamp: pts,
+                                             rawCount: rawCount, trackCount: trackCount)
+            let tracks = (object["tracks"] as? [[Any]] ?? []).compactMap(decodeTrack)
+            let meta = metadata[index]
+            var snapshot: PerceptionCalibrationSnapshot?
+            if let encoded = object["calibration"] as? [String: Any],
+               let focal = (encoded["focal"] as? NSNumber)?.doubleValue,
+               let crop = encoded["crop"] as? [NSNumber], crop.count == 4,
+               let pose = encoded["pose"] as? [NSNumber], pose.count == 5 {
+                let mount = MountPose(pitch: pose[0].doubleValue, roll: pose[1].doubleValue,
+                                      yaw: pose[2].doubleValue, height: pose[3].doubleValue,
+                                      forwardOfOrigin: pose[4].doubleValue,
+                                      pitchFrom: .estimated, rollFrom: .gravity,
+                                      yawFrom: .estimated, heightFrom: .manual,
+                                      pitchSigmaDegrees: nil)
+                let calibration = Calibration(pose: mount, K: meta.1,
+                                              frameWidth: meta.2, frameHeight: meta.3)
+                let imageCrop = ImageCrop(x: crop[0].intValue, y: crop[1].intValue,
+                                          width: crop[2].intValue, height: crop[3].intValue)
+                snapshot = PerceptionCalibrationSnapshot(
+                    calibration: calibration, crop: imageCrop, focal: focal,
+                    focalMatched: true, visibleVoxelFraction: 0,
+                    guides: calibration.groundGuides())
+            }
+            let ego = object["ego"] as? [NSNumber] ?? []
+            let dt = ego.count > 3 ? ego[3].doubleValue : 0
+            let speed = dt > 0 ? hypot(ego[0].doubleValue, ego[1].doubleValue) / dt : -1
+            return ReplayDisplayFrame(summary: summary, objects: tracks,
+                                      calibration: snapshot, egoSpeed: speed)
+        }
+    }
+
+    private static func decodeTrack(_ values: [Any]) -> TrackedVehicle? {
+        func d(_ index: Int) -> Double? {
+            guard values.indices.contains(index) else { return nil }
+            return (values[index] as? NSNumber)?.doubleValue
+        }
+        guard values.count >= 15,
+              let id = d(0).map({ Int($0) }), let x = d(1), let y = d(2), let z = d(3),
+              let length = d(4), let width = d(5), let height = d(6),
+              let yaw = d(7), let modelYaw = d(8), let label = d(9).map({ Int($0) }),
+              let score = d(10).map({ Float($0) }), let hits = d(11).map({ Int($0) }),
+              let observed = values[12] as? Bool,
+              let stateRaw = values[13] as? String,
+              let state = VehicleMotionState(rawValue: stateRaw) else { return nil }
+        let velocity: SIMD2<Double>? = (values[14] as? [NSNumber]).flatMap {
+            $0.count == 2 ? SIMD2($0[0].doubleValue, $0[1].doubleValue) : nil
+        }
+        let trail: [VehicleTrailPoint] = (values.count > 15 ? values[15] as? [[NSNumber]] : nil)
+            .map { rows in rows.compactMap { row in
+                guard row.count == 3 else { return nil }
+                return VehicleTrailPoint(timestamp: row[0].doubleValue,
+                                         x: row[1].doubleValue, y: row[2].doubleValue)
+            } } ?? []
+        let headingSource = values.count > 16
+            ? VehicleHeadingSource(rawValue: values[16] as? String ?? "")
+                ?? (velocity == nil ? .model : .motion)
+            : (velocity == nil ? .model : .motion)
+        return TrackedVehicle(id: id, x: x, y: y, z: z, length: length, width: width,
+                              height: height, yaw: yaw, modelYaw: modelYaw,
+                              headingSource: headingSource,
+                              label: label, score: score, hits: hits, observed: observed,
+                              ageSeconds: 0, state: state, velocity: velocity, trail: trail)
+    }
+
     private func loadManifest(_ drive: URL) throws -> Manifest {
         let url = drive.appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: url) else { throw ReplayError.missing("manifest.json") }
@@ -379,9 +474,12 @@ final class ReplayProcessor: @unchecked Sendable {
         }.joined(separator: ",")
         let tracks = result.trackedObjects.map { t in
             let velocity = t.velocity.map { "[\($0.x),\($0.y)]" } ?? "null"
+            let trail = t.trail.map { "[\($0.timestamp),\($0.x),\($0.y)]" }
+                .joined(separator: ",")
             return "[\(t.id),\(t.x),\(t.y),\(t.z),\(t.length),\(t.width),\(t.height),"
                 + "\(t.yaw),\(t.modelYaw),\(t.label),\(t.score),\(t.hits),\(t.observed),"
-                + "\"\(t.state.rawValue)\",\(velocity)]"
+                + "\"\(t.state.rawValue)\",\(velocity),[\(trail)],"
+                + "\"\(t.headingSource.rawValue)\"]"
         }.joined(separator: ",")
         let ego = result.egoMotion
         let calibration = result.calibration

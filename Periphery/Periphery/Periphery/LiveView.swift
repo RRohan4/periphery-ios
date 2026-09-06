@@ -4,8 +4,8 @@
 //  The pipeline lives in FramePipeline.swift and the renderer in WorldView.swift.
 //  What is left here is SwiftUI and the main-actor model that feeds it.
 //
-//  LANDSCAPE. The app is landscape-locked and this screen is split down the
-//  middle: camera on the left, bird's-eye on the right. That is not a taste
+//  LANDSCAPE. The app is landscape-locked and this screen gives the world view
+//  the majority of the width, with camera evidence and HUD beside it. That is not a taste
 //  decision. The capture buffer is landscape however the phone is held, so a
 //  portrait mount does not rotate the image, it lays the road sideways across a
 //  crop computed for the other axis -- see MotionSource.cameraRoll. A screen
@@ -29,7 +29,7 @@ struct CameraPreview: UIViewRepresentable {
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.layer.session = session
-        view.layer.videoGravity = .resizeAspect
+        view.layer.videoGravity = .resizeAspectFill
         // Zero rotation relative to the sensor's native readout, i.e. show the
         // buffer exactly as it arrives. GroundGuideOverlay draws in SOURCE
         // PIXELS and maps them with a single uniform scale, so any rotation
@@ -110,70 +110,21 @@ struct LiveView: View {
     @ObservedObject private var model = LiveSession.shared
 
     var body: some View {
-        // No NavigationStack: a title bar costs a fifth of the height in
-        // landscape and this screen has nothing to navigate to.
-        HStack(spacing: 1) {
-            cameraPane
-            worldPane
-        }
-        .background(Color.black)
-        .overlay(alignment: .bottomLeading) { stats }
-        .overlay(alignment: .topTrailing) { guidesToggle }
-        .statusBarHidden()
-        .task { await model.ensureStarted() }
-    }
-
-    /// Left half. `.fill` rather than `.fit`: at a 50/50 split the pane is
-    /// roughly square and fitting a 16:9 preview into it would letterbox away
-    /// most of the image. The guides are drawn in the same geometry, so they
-    /// stay registered to the road either way.
-    private var cameraPane: some View {
-        GeometryReader { geometry in
+        PerceptionSplitView(objects: model.snapshot.trackedObjects,
+                            calibration: model.snapshot.calibration,
+                            egoSpeed: model.snapshot.speed,
+                            sourceLabel: "live") {
             ZStack {
                 Color.black
                 if let session = model.session {
                     CameraPreview(session: session)
-                        .aspectRatio(16.0 / 9.0, contentMode: .fill)
-                        // Attached BEFORE the frame, so the overlay inherits
-                        // the preview's aspect-filled bounds and the two are
-                        // clipped together. Attach it after and the guides get
-                        // the pane's geometry instead, which is a different
-                        // scale and slides the horizon off the road.
-                        .overlay {
-                            if model.showGuides {
-                                GroundGuideOverlay(guides: model.snapshot.guides)
-                            }
-                        }
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .clipped()
                 } else {
-                    Text(model.status)
-                        .font(.caption)
-                        .foregroundStyle(.white)
+                    Text(model.status).font(.caption).foregroundStyle(.white)
                 }
             }
         }
-    }
-
-    /// Right half.
-    private var worldPane: some View {
-        WorldView(detections: model.snapshot.detections,
-                  focal: model.snapshot.focal > 0
-                      ? model.snapshot.focal : Contract.trainedFocal,
-                  egoSpeed: model.snapshot.speed)
-    }
-
-    private var guidesToggle: some View {
-        Button {
-            model.showGuides.toggle()
-        } label: {
-            Image(systemName: model.showGuides ? "grid.circle.fill" : "grid.circle")
-                .font(.title3)
-                .foregroundStyle(.white)
-                .padding(8)
-                .background(.black.opacity(0.45), in: Circle())
-        }
-        .padding(10)
+        .statusBarHidden()
+        .task { await model.ensureStarted() }
     }
 
     private var stats: some View {
@@ -191,7 +142,8 @@ struct LiveView: View {
                         snapshot.focal, snapshot.lensPosition,
                         snapshot.focusHunting ? "hunting"
                             : (snapshot.focusLocked ? "locked" : "auto"),
-                        snapshot.speed >= 0 ? String(format: "%.1f m/s", snapshot.speed) : "no fix",
+                        snapshot.speed >= 0
+                            ? String(format: "%.0f km/h", snapshot.speed * 3.6) : "no fix",
                         snapshot.thermal, snapshot.dropped))
                 .foregroundStyle(snapshot.focusHunting ? Color.orange
                                  : Color.white.opacity(0.92))

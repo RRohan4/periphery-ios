@@ -51,6 +51,7 @@ struct SelfCheck {
         results.append(checkEgoMotionArc())
         results.append(checkReplayIntrinsics())
         results.append(checkReplayClockMapping())
+        results.append(checkPreviewAspectFill())
         return results
     }
 
@@ -65,6 +66,23 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    private static func checkPreviewAspectFill() -> Result {
+        let source = CGSize(width: 1920, height: 1080)
+        let destination = CGSize(width: 400, height: 200)
+        guard let topLeft = CameraBoxOverlay.aspectFill(
+            point: SIMD2(0, 0), source: source, destination: destination),
+              let bottomRight = CameraBoxOverlay.aspectFill(
+                point: SIMD2(1920, 1080), source: source, destination: destination) else {
+            return Result(name: "preview aspect-fill", passed: false,
+                          detail: "valid image geometry was rejected")
+        }
+        let worst = [abs(topLeft.x), abs(topLeft.y + 12.5),
+                     abs(bottomRight.x - 400), abs(bottomRight.y - 212.5)].max()
+            ?? .infinity
+        return Result(name: "preview aspect-fill", passed: worst < 1e-9,
+                      detail: "image and 3D overlay share one crop, max diff \(format(Double(worst)))")
+    }
 
     private static func checkReplayClockMapping() -> Result {
         // Mirrors the flagged drive: the legacy location `t` is wrong by about

@@ -21,6 +21,9 @@ final class FramePipeline: @unchecked Sendable {
     struct Snapshot {
         var detections: [Detection] = []
         var trackedObjects: [TrackedVehicle] = []
+        /// Full source-frame geometry for the presentation adapter. Rendering
+        /// consumes it but never feeds changes back into perception.
+        var calibration: PerceptionCalibrationSnapshot?
         var inferenceMS: Double = 0
         var preprocessMS: Double = 0
         var fps: Double = 0
@@ -433,6 +436,7 @@ final class FramePipeline: @unchecked Sendable {
                     rejectImplausible: rejectImplausible))
             let crop = result.calibration.crop
             snapshot.focal = result.calibration.focal
+            snapshot.calibration = result.calibration
             snapshot.focalMatched = result.calibration.focalMatched
             snapshot.visibleFraction = result.calibration.visibleVoxelFraction
             snapshot.guides = result.calibration.guides

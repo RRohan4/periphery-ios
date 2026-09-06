@@ -1,12 +1,49 @@
 import Combine
+import AVFoundation
 import os
 import SwiftUI
 import UIKit
 
+struct RecordedVideoView: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> PlayerView {
+        let view = PlayerView()
+        view.layer.player = player
+        view.layer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateUIView(_ view: PlayerView, context: Context) { view.layer.player = player }
+
+    final class PlayerView: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+        override var layer: AVPlayerLayer { super.layer as! AVPlayerLayer }
+    }
+}
+
 struct ReplayView: View {
     @StateObject private var model = ReplayModel()
 
+    @ViewBuilder
     var body: some View {
+        if let frame = model.currentDisplayFrame, !model.processing {
+            ZStack {
+                PerceptionSplitView(objects: frame.objects,
+                                    calibration: frame.calibration,
+                                    egoSpeed: frame.egoSpeed,
+                                    sourceLabel: "replay") {
+                    RecordedVideoView(player: model.player)
+                }
+                replayControls(frame)
+            }
+            .statusBarHidden()
+        } else {
+            replayBrowser
+        }
+    }
+
+    private var replayBrowser: some View {
         NavigationStack {
             List {
                 Section("Local drives") {
@@ -57,6 +94,31 @@ struct ReplayView: View {
             .task { model.refresh() }
         }
     }
+
+    private func replayControls(_ frame: ReplayDisplayFrame) -> some View {
+        VStack {
+            HStack {
+                Button("Drives") { model.closePlayback() }
+                Spacer()
+                Text("frame \(frame.summary.index + 1)/\(model.displayFrames.count)")
+                    .font(.system(size: 10, design: .monospaced))
+                Button("Reprocess") { model.reprocess() }
+            }
+            Spacer()
+            HStack {
+                Button("◀︎") { model.step(-1) }
+                Button(model.playing ? "Pause" : "Play") { model.togglePlay() }
+                Button("▶︎") { model.step(1) }
+                Slider(value: Binding(
+                    get: { model.position },
+                    set: { value in model.position = value; model.seekVideo() }),
+                       in: 0...Double(max(model.displayFrames.count - 1, 0)), step: 1)
+            }
+        }
+        .buttonStyle(.borderedProminent)
+        .font(.caption)
+        .padding(10)
+    }
 }
 
 @MainActor
@@ -64,6 +126,7 @@ final class ReplayModel: ObservableObject {
     @Published var drives: [URL] = []
     @Published var selected: URL?
     @Published var frames: [ReplayFrameSummary] = []
+    @Published var displayFrames: [ReplayDisplayFrame] = []
     @Published var position = 0.0
     @Published var progress = 0.0
     @Published var processing = false
@@ -82,11 +145,21 @@ final class ReplayModel: ObservableObject {
     private var playTask: Task<Void, Never>?
     private var replayStarted = Date()
     private var priorIdleTimerDisabled = false
+    let player = AVPlayer()
+
+    var currentDisplayFrame: ReplayDisplayFrame? {
+        guard !displayFrames.isEmpty else { return nil }
+        return displayFrames[min(max(Int(position), 0), displayFrames.count - 1)]
+    }
 
     func refresh() { drives = DriveRecorder.sessions() }
     func select(_ drive: URL) {
         selected = drive; frames = ReplayProcessor.loadSummaries(drive: drive)
+        displayFrames = ReplayProcessor.loadDisplayFrames(drive: drive)
+        player.replaceCurrentItem(with: AVPlayerItem(
+            url: drive.appendingPathComponent("video.mov")))
         position = 0; message = frames.isEmpty ? "No replay sidecar yet." : "Loaded replay-safety40-v1.jsonl"
+        seekVideo()
     }
 
     func reprocess() {
@@ -136,6 +209,7 @@ final class ReplayModel: ObservableObject {
                 }
                 await MainActor.run {
                     self.frames = result; self.position = 0; self.processing = false
+                    self.displayFrames = ReplayProcessor.loadDisplayFrames(drive: drive)
                     self.finishProcessing()
                     self.message = "Replay complete; versioned sidecar saved."
                 }
@@ -156,16 +230,52 @@ final class ReplayModel: ObservableObject {
     func cancel() { processor?.cancel() }
     func step(_ amount: Int) {
         playing = false; playTask?.cancel()
-        position = min(max(position + Double(amount), 0), Double(max(frames.count - 1, 0)))
+        player.pause()
+        position = min(max(position + Double(amount), 0),
+                       Double(max(displayFrames.count - 1, 0)))
+        seekVideo()
     }
     func togglePlay() {
         playing.toggle(); playTask?.cancel()
-        guard playing else { return }
+        guard playing else { player.pause(); return }
+        player.play()
         playTask = Task {
-            while !Task.isCancelled, playing, Int(position) < frames.count - 1 {
-                try? await Task.sleep(for: .milliseconds(100)); position += 1
+            while !Task.isCancelled, playing, Int(position) < displayFrames.count - 1 {
+                try? await Task.sleep(for: .milliseconds(33))
+                guard let first = displayFrames.first else { break }
+                let target = first.summary.timestamp + player.currentTime().seconds
+                position = Double(nearestFrameIndex(to: target))
             }
-            playing = false
+            player.pause(); playing = false
         }
+    }
+
+    func seekVideo() {
+        guard let first = displayFrames.first, let frame = currentDisplayFrame else { return }
+        let seconds = max(frame.summary.timestamp - first.summary.timestamp, 0)
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func closePlayback() {
+        playing = false; playTask?.cancel(); player.pause()
+        displayFrames = []
+    }
+
+    private func nearestFrameIndex(to timestamp: Double) -> Int {
+        var low = 0, high = displayFrames.count
+        while low < high {
+            let middle = (low + high) / 2
+            if displayFrames[middle].summary.timestamp < timestamp {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        if low == 0 { return 0 }
+        if low == displayFrames.count { return displayFrames.count - 1 }
+        let before = displayFrames[low - 1].summary.timestamp
+        let after = displayFrames[low].summary.timestamp
+        return timestamp - before <= after - timestamp ? low - 1 : low
     }
 }

@@ -9,11 +9,9 @@
 //  the two stay diffable; where this file and that one disagree, that one is
 //  the reference.
 //
-//  There is no tracker on device yet, so there are no ids, no moving/parked
-//  colours, no velocity arrows and no trails. The row struct is shaped the way
-//  build_comma_viewer.py shapes its BEV rows -- the geometric fields first,
-//  everything else appended and optional -- so porting associate.py later
-//  touches the tracker and not this file.
+//  It consumes confirmed TrackedVehicle values and never makes tracking
+//  decisions. IDs, state, velocity, observation status and trails therefore
+//  stay identical between Live, Replay and recorded sidecars.
 
 import SwiftUI
 import simd
@@ -130,12 +128,37 @@ private struct WorldCamera {
         width = size.width
         height = size.height
         let tilt = 27.0 * .pi / 180.0
-        let distance = 132.0, targetX = 22.0, targetZ = 0.9
+        let targetX = 18.0, targetZ = 0.9
+        let f = height / (2 * tan(26.0 * .pi / 360.0))
+        let margin = min(30.0, min(width, height) * 0.08)
+        func fits(_ distance: Double) -> Bool {
+            let cameraX = targetX - distance * cos(tilt)
+            let cameraZ = targetZ + distance * sin(tilt)
+            for x in [-11.0, 47.0] {
+                for y in [-15.0, 15.0] {
+                    let dx = x - cameraX, dz = -cameraZ
+                    let depth = dx * cos(tilt) - dz * sin(tilt)
+                    guard depth > 0.5 else { return false }
+                    let sx = width / 2 - y * f / depth
+                    let sy = height / 2
+                        - (dx * sin(tilt) + dz * cos(tilt)) * f / depth
+                    if sx < margin || sx > width - margin
+                        || sy < margin || sy > height - margin { return false }
+                }
+            }
+            return true
+        }
+        var low = 30.0, high = 520.0
+        for _ in 0..<36 {
+            let middle = (low + high) / 2
+            if fits(middle) { high = middle } else { low = middle }
+        }
+        let distance = high
         camX = targetX - distance * cos(tilt)
         camZ = targetZ + distance * sin(tilt)
         fx = cos(tilt); fz = -sin(tilt)
         ux = sin(tilt); uz = cos(tilt)
-        focal = height / (2 * tan(26.0 * .pi / 360.0))
+        focal = f
     }
 
     /// Vehicle metres (x forward, y left, z up) to view points, plus depth for
@@ -166,7 +189,7 @@ private struct WorldCamera {
 // MARK: - The view
 
 struct WorldView: View {
-    let detections: [Detection]
+    let objects: [TrackedVehicle]
     /// The live focal in network pixels, so the field-of-view wedge shows the
     /// camera actually in use rather than the trained one.
     var focal: Double = Contract.trainedFocal
@@ -179,7 +202,7 @@ struct WorldView: View {
             drawGround(context: &context, camera: camera)
             drawRangeRings(context: &context, camera: camera)
             drawEgoArrow(context: &context, camera: camera)
-            drawDetections(context: &context, camera: camera)
+            drawObjects(context: &context, camera: camera)
             // Ego last: it is nearest to the virtual lens.
             drawVehicle(context: &context, camera: camera,
                         x: 0, y: 0, yaw: 0, length: 4.6, width: 1.9, height: 1.5,
@@ -191,8 +214,8 @@ struct WorldView: View {
     // MARK: Scene
 
     private func drawGround(context: inout GraphicsContext, camera: WorldCamera) {
-        let quad = [SIMD3<Double>(-12, -23, 0), SIMD3<Double>(56, -23, 0),
-                    SIMD3<Double>(56, 23, 0), SIMD3<Double>(-12, 23, 0)]
+        let quad = [SIMD3<Double>(-60, -2000, 0), SIMD3<Double>(4000, -2000, 0),
+                    SIMD3<Double>(4000, 2000, 0), SIMD3<Double>(-60, 2000, 0)]
         if var path = camera.path(quad) {
             path.closeSubpath()
             context.fill(path, with: .color(Palette.panel2))
@@ -243,7 +266,7 @@ struct WorldView: View {
                   from: SIMD3<Double>(0, 0, 0.10), to: SIMD3<Double>(egoSpeed, 0, 0.10),
                   color: Palette.ink2, lineWidth: 2, dash: [5, 4])
         if let p = camera.project(egoSpeed, 0, 0.12) {
-            context.draw(Text(String(format: "ego %.1f m/s", egoSpeed))
+            context.draw(Text(String(format: "ego %.0f km/h", egoSpeed * 3.6))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(Palette.ink2),
                          at: CGPoint(x: p.point.x + 6, y: p.point.y), anchor: .leading)
@@ -252,28 +275,50 @@ struct WorldView: View {
 
     // MARK: Detections
 
-    private func drawDetections(context: inout GraphicsContext, camera: WorldCamera) {
+    private func drawObjects(context: inout GraphicsContext, camera: WorldCamera) {
         // Far to near, so nearer bodies paint over further ones.
-        let sorted = detections
-            .compactMap { d -> (Detection, Double)? in
-                guard let p = camera.project(d.x, d.y, 0) else { return nil }
-                return (d, p.depth)
+        let sorted = objects
+            .compactMap { object -> (TrackedVehicle, Double)? in
+                guard let p = camera.project(object.x, object.y, 0) else { return nil }
+                return (object, p.depth)
             }
             .sorted { $0.1 > $1.1 }
 
-        for (d, _) in sorted {
-            let profile = VehicleProfile.profile(label: d.label, length: d.length, width: d.width)
-            let h = d.height.isFinite && d.height > 0.2 ? d.height : profile.defaultHeight
+        // Trails are ground evidence and therefore paint below every body.
+        for (object, _) in sorted where object.trail.count > 1 {
+            let points = object.trail.map { SIMD3<Double>($0.x, $0.y, 0.08) }
+            if let path = camera.path(points) {
+                context.stroke(path, with: .color(PerceptionColour.state(object.state).opacity(0.65)),
+                               lineWidth: 1.5)
+            }
+        }
+
+        for (object, _) in sorted {
+            let profile = VehicleProfile.profile(label: object.label,
+                                                 length: object.length, width: object.width)
+            let h = object.height.isFinite && object.height > 0.2
+                ? object.height : profile.defaultHeight
+            let colour = PerceptionColour.state(object.state)
             drawVehicle(context: &context, camera: camera,
-                        x: d.x, y: d.y, yaw: d.yaw, length: d.length, width: d.width,
+                        x: object.x, y: object.y, yaw: object.yaw,
+                        length: object.length, width: object.width,
                         height: h, profile: profile,
-                        fill: Palette.visionSoft, stroke: Palette.vision)
-            if let label = camera.project(d.x, d.y, h + 0.5) {
-                context.draw(Text(String(format: "%.0f m", d.x))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(Palette.vision),
-                             at: CGPoint(x: label.point.x + 3, y: label.point.y),
-                             anchor: .leading)
+                        fill: colour.opacity(object.observed ? 0.16 : 0.07), stroke: colour,
+                        dashed: !object.observed)
+        }
+
+        // Labels are a second pass, so no subsequently drawn body can cover them.
+        for (object, _) in sorted.reversed() {
+            let h = max(object.height, 1.0)
+            if let label = camera.project(object.x, object.y, h + 0.5) {
+                let speed = object.velocity.map { hypot($0.x, $0.y) * 3.6 }
+                let text = speed.map { String(format: "#%d   %.0f m   %.0f km/h",
+                                              object.id, object.x, $0) }
+                    ?? String(format: "#%d   %.0f m   —", object.id, object.x)
+                context.draw(Text(text)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(PerceptionColour.state(object.state)),
+                             at: CGPoint(x: label.point.x + 3, y: label.point.y), anchor: .leading)
             }
         }
     }
@@ -283,7 +328,8 @@ struct WorldView: View {
     private func drawVehicle(context: inout GraphicsContext, camera: WorldCamera,
                              x: Double, y: Double, yaw: Double,
                              length: Double, width: Double, height: Double,
-                             profile: VehicleProfile, fill: Color, stroke: Color) {
+                             profile: VehicleProfile, fill: Color, stroke: Color,
+                             dashed: Bool = false) {
         let c = cos(yaw), s = sin(yaw)
         func point(_ p: SIMD2<Double>, _ z: Double) -> SIMD3<Double> {
             SIMD3<Double>(x + p.x * length * c - p.y * width * s,
@@ -300,7 +346,9 @@ struct WorldView: View {
                 if var path = camera.path([lower[i], lower[j], upper[j], upper[i]]) {
                     path.closeSubpath()
                     context.fill(path, with: .color(sideFill))
-                    context.stroke(path, with: .color(sideStroke), lineWidth: 1.05)
+                    context.stroke(path, with: .color(sideStroke),
+                                   style: StrokeStyle(lineWidth: 1.05,
+                                                      dash: dashed ? [5, 4] : []))
                 }
             }
             context.opacity = 1.0
@@ -309,7 +357,9 @@ struct WorldView: View {
             if var path = camera.path(ring) {
                 path.closeSubpath()
                 context.fill(path, with: .color(capFill))
-                context.stroke(path, with: .color(stroke), lineWidth: lineWidth)
+                context.stroke(path, with: .color(stroke),
+                               style: StrokeStyle(lineWidth: lineWidth,
+                                                  dash: dashed ? [5, 4] : []))
             }
         }
 
