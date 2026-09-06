@@ -17,6 +17,10 @@ struct ReplayView: View {
                         Text(drive.lastPathComponent).font(.system(.caption, design: .monospaced))
                         if model.processing {
                             ProgressView(value: model.progress)
+                            Text("\(model.processedFrames) / \(model.totalFrames) frames · "
+                                 + String(format: "%.1f%%", model.progress * 100))
+                                .font(.system(.caption, design: .monospaced))
+                            Text(model.rateLine).font(.system(.caption2, design: .monospaced))
                             Button("Cancel", role: .destructive) { model.cancel() }
                         } else {
                             Button("Reprocess entire drive") { model.reprocess() }
@@ -50,10 +54,14 @@ final class ReplayModel: ObservableObject {
     @Published var position = 0.0
     @Published var progress = 0.0
     @Published var processing = false
+    @Published var processedFrames = 0
+    @Published var totalFrames = 0
     @Published var playing = false
     @Published var message: String?
+    @Published var rateLine = "starting…"
     private var processor: ReplayProcessor?
     private var playTask: Task<Void, Never>?
+    private var replayStarted = Date()
 
     func refresh() { drives = DriveRecorder.sessions() }
     func select(_ drive: URL) {
@@ -67,22 +75,32 @@ final class ReplayModel: ObservableObject {
             message = "Stop recording before Replay."; return
         }
         let worker = ReplayProcessor(); processor = worker; processing = true; progress = 0
-        LiveSession.shared.pipeline.setPerceptionEnabled(false)
+        processedFrames = 0; totalFrames = 0
+        replayStarted = Date(); rateLine = "starting…"
+        LiveSession.shared.pipeline.suspendForReplay()
         message = "Running the shared perception engine…"
         Task.detached {
             do {
                 let result = try worker.process(drive: drive) { done, total in
-                    Task { @MainActor in self.progress = Double(done) / Double(max(total, 1)) }
+                    Task { @MainActor in
+                        self.processedFrames = done; self.totalFrames = total
+                        self.progress = Double(done) / Double(max(total, 1))
+                        let elapsed = max(Date().timeIntervalSince(self.replayStarted), 0.001)
+                        let fps = Double(done) / elapsed
+                        let remaining = fps > 0 ? Double(max(total - done, 0)) / fps : 0
+                        self.rateLine = String(format: "%.1f fps · elapsed %.0fs · ETA %.0fs",
+                                               fps, elapsed, remaining)
+                    }
                 }
                 await MainActor.run {
                     self.frames = result; self.position = 0; self.processing = false
-                    LiveSession.shared.pipeline.setPerceptionEnabled(true)
+                    LiveSession.shared.pipeline.resumeAfterReplay()
                     self.message = "Replay complete; versioned sidecar saved."
                 }
             } catch {
                 await MainActor.run {
                     self.processing = false; self.message = String(describing: error)
-                    LiveSession.shared.pipeline.setPerceptionEnabled(true)
+                    LiveSession.shared.pipeline.resumeAfterReplay()
                 }
             }
         }

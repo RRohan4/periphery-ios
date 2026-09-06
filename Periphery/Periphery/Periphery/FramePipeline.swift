@@ -245,11 +245,23 @@ final class FramePipeline: @unchecked Sendable {
         egoMotion.reset()
     }
 
-    /// Replay owns the accelerator while reprocessing. Capture and raw sensor
-    /// recording may continue, but two perception engines never compete.
-    func setPerceptionEnabled(_ enabled: Bool) {
-        perceptionLock.withLock { perceptionEnabled = enabled }
-        if enabled { engine?.resetTemporalState(); egoMotion.reset() }
+    /// Replay owns the camera decoder and accelerator. Stop every live source,
+    /// including optical flow, so a five-minute replay is the only heavy job.
+    func suspendForReplay() {
+        perceptionLock.withLock { perceptionEnabled = false }
+        camera.stop()
+        motion.stop()
+        foe.reset()
+        engine?.resetTemporalState()
+        egoMotion.reset()
+    }
+
+    func resumeAfterReplay() {
+        engine?.resetTemporalState()
+        egoMotion.reset()
+        startMotion()
+        camera.start()
+        perceptionLock.withLock { perceptionEnabled = true }
     }
 
     // MARK: Cold-start pose

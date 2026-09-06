@@ -133,18 +133,12 @@ Do these before driving anywhere. Each one fails loudly and cheaply.
 | 4 | **Flow** | Walk forward holding the phone. See below. |
 | 5 | **Live** | Landscape, camera left, bird's-eye right. Horizon line should sit on the real horizon. |
 
-### Do not run Latency → Sustained
+### Long-running work stays off the UI actor
 
-The target sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which makes
-`enum Benchmark` implicitly main-actor isolated. The `Task.detached` that wraps
-it therefore hops straight back to the main actor, defeating the comment above
-it — so a ten-minute run freezes the UI and the watchdog may kill the app.
-Swift 5 language mode reports this as a warning, not an error, which is why it
-has always built and always been wrong.
-
-Burst is unaffected. The fix is `nonisolated` on Benchmark, Detector and
-Preprocessor, and it is unwritten because that chain cannot be verified without
-a compiler.
+The target intentionally uses Swift's normal nonisolated default. UI models are
+explicitly `@MainActor`; inference, Replay, capture, recording, flow, and the
+Latency benchmark remain on their worker executors. If Replay progress or the
+Sustained benchmark stops animating, treat that as an actor-isolation regression.
 
 ### The Flow tab, on foot
 
