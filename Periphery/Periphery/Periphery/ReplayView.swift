@@ -28,6 +28,7 @@ struct ReplayView: View {
     /// drawing and never rewrite the recorded sidecar or touch inference.
     @State private var demoHeight = 1.50
     @State private var cameraRight = 0.50
+    @State private var controlsVisible = true
 
     @ViewBuilder
     var body: some View {
@@ -39,7 +40,16 @@ struct ReplayView: View {
                                     cameraRight: cameraRight) {
                     RecordedVideoView(player: model.player)
                 }
-                replayControls(displayFrame)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        controlsVisible.toggle()
+                    }
+                }
+                if controlsVisible {
+                    replayControls(displayFrame)
+                        .transition(.opacity)
+                }
             }
             .statusBarHidden()
         } else {
