@@ -252,12 +252,21 @@ final class ReplayProcessor: @unchecked Sendable {
             guard fields.count >= 12, let pts = Double(fields[0]),
                   let width = Int(fields[10]), let height = Int(fields[11]) else { return nil }
             let values = fields[1...9].compactMap { Double($0) }
-            let K = values.count == 9 ? simd_double3x3(columns: (
-                SIMD3(values[0], values[1], values[2]),
-                SIMD3(values[3], values[4], values[5]),
-                SIMD3(values[6], values[7], values[8]))) : nil
+            let K = Self.intrinsics(fromRowMajorValues: values)
             return FrameRow(pts: pts, K: K, width: width, height: height)
         }
+    }
+
+    /// `frames.csv` stores k00,k01,k02,k10,... in row-major order. SIMD
+    /// matrices are column-major internally, so using `columns:` here silently
+    /// transposes K and moves the principal point from (cx, cy) to (0, 0).
+    static func intrinsics(fromRowMajorValues values: [Double]) -> simd_double3x3? {
+        guard values.count == 9 else { return nil }
+        return simd_double3x3(rows: [
+            SIMD3(values[0], values[1], values[2]),
+            SIMD3(values[3], values[4], values[5]),
+            SIMD3(values[6], values[7], values[8]),
+        ])
     }
 
     private func loadRates(_ url: URL) throws -> [Rate] {

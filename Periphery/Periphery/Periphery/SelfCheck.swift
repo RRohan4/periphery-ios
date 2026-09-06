@@ -49,6 +49,7 @@ struct SelfCheck {
         results.append(checkTensorTransfer(padded: true))
         results.append(checkVehicleTracker(bundle))
         results.append(checkEgoMotionArc())
+        results.append(checkReplayIntrinsics())
         return results
     }
 
@@ -63,6 +64,21 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    private static func checkReplayIntrinsics() -> Result {
+        let values = [1375.836548, 0, 959.283203,
+                      0, 1375.836548, 550.655640,
+                      0, 0, 1]
+        guard let K = ReplayProcessor.intrinsics(fromRowMajorValues: values) else {
+            return Result(name: "replay intrinsics", passed: false,
+                          detail: "valid row was rejected")
+        }
+        let worst = [abs(K[0][0] - values[0]), abs(K[1][1] - values[4]),
+                     abs(K[2][0] - values[2]), abs(K[2][1] - values[5])].max()
+            ?? .infinity
+        return Result(name: "replay intrinsics", passed: worst < 1e-12,
+                      detail: "row-major CSV preserves fx/fy/cx/cy, max diff \(format(worst))")
+    }
 
     private static func checkEgoMotionArc() -> Result {
         let straight = LiveEgoMotion.arcDelta(speed: 10, yawRate: 0, dt: 0.1)
