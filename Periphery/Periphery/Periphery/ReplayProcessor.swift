@@ -76,6 +76,7 @@ final class ReplayProcessor: @unchecked Sendable {
     }
     private struct Rate { var t: Double; var yaw: Double }
     private struct Speed { var t: Double; var value: Double }
+    struct ClockAnchor { var wall: Double; var boot: Double }
     private struct Manifest: Decodable {
         struct Pose: Decodable {
             var pitchDeg, rollDeg, yawDeg, height, forward: Double
@@ -106,7 +107,9 @@ final class ReplayProcessor: @unchecked Sendable {
         let pose = mountPose(manifest.pose)
         let rows = try loadFrames(drive.appendingPathComponent("frames.csv"))
         let rates = try loadRates(drive.appendingPathComponent("motion.csv"))
-        let speeds = try loadSpeeds(drive.appendingPathComponent("location.csv"))
+        let anchors = try loadClockAnchors(drive.appendingPathComponent("anchors.csv"))
+        let speeds = try loadSpeeds(drive.appendingPathComponent("location.csv"),
+                                   anchors: anchors)
         guard !rows.isEmpty else { throw ReplayError.invalid("frames.csv is empty") }
 
         let asset = AVURLAsset(url: drive.appendingPathComponent("video.mov"))
@@ -280,12 +283,34 @@ final class ReplayProcessor: @unchecked Sendable {
         }
     }
 
-    private func loadSpeeds(_ url: URL) throws -> [Speed] {
+    private func loadClockAnchors(_ url: URL) throws -> [ClockAnchor] {
+        try csv(url).dropFirst().compactMap { f in
+            guard f.count > 1, let wall = Double(f[0]), let boot = Double(f[1]) else {
+                return nil
+            }
+            return ClockAnchor(wall: wall, boot: boot)
+        }
+    }
+
+    /// CoreLocation timestamps originate on the wall clock. Recordings also carry
+    /// a republished boot-domain value, but older captures could write that value
+    /// with a fixed offset. Reconstruct from `t_wall` and the nearest recorded
+    /// anchor so GPS speed always shares the video/IMU timeline.
+    static func bootTimestamp(recorded: Double, wall: Double?,
+                              anchors: [ClockAnchor]) -> Double {
+        guard let wall, wall.isFinite, !anchors.isEmpty else { return recorded }
+        let anchor = anchors.min { abs($0.wall - wall) < abs($1.wall - wall) }!
+        return anchor.boot + (wall - anchor.wall)
+    }
+
+    private func loadSpeeds(_ url: URL, anchors: [ClockAnchor]) throws -> [Speed] {
         try csv(url).dropFirst().compactMap { f in
             guard f.count > 7, let t = Double(f[0]), let speed = Double(f[7]), speed >= 0 else {
                 return nil
             }
-            return Speed(t: t, value: speed)
+            let wall = f.count > 1 ? Double(f[1]) : nil
+            return Speed(t: Self.bootTimestamp(recorded: t, wall: wall, anchors: anchors),
+                         value: speed)
         }
     }
 

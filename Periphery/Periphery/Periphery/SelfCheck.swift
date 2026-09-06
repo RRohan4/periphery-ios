@@ -50,6 +50,7 @@ struct SelfCheck {
         results.append(checkVehicleTracker(bundle))
         results.append(checkEgoMotionArc())
         results.append(checkReplayIntrinsics())
+        results.append(checkReplayClockMapping())
         return results
     }
 
@@ -64,6 +65,23 @@ struct SelfCheck {
     }
 
     // MARK: - Checks
+
+    private static func checkReplayClockMapping() -> Result {
+        // Mirrors the flagged drive: the legacy location `t` is wrong by about
+        // 3,500 s, while t_wall and anchors.csv describe the correct mapping.
+        let anchors = [
+            ReplayProcessor.ClockAnchor(wall: 1_788_536_859.410443, boot: 9_005.847112),
+            ReplayProcessor.ClockAnchor(wall: 1_788_536_919.432992, boot: 9_065.874136),
+        ]
+        let mapped = ReplayProcessor.bootTimestamp(
+            recorded: 12_506.511783, wall: 1_788_536_860.004141, anchors: anchors)
+        let expected = 9_006.440810
+        let fallback = ReplayProcessor.bootTimestamp(recorded: 42, wall: nil,
+                                                      anchors: anchors)
+        let worst = max(abs(mapped - expected), abs(fallback - 42))
+        return Result(name: "replay clock mapping", passed: worst < 1e-6,
+                      detail: "GPS wall time maps onto video/IMU boot time, max diff \(format(worst))")
+    }
 
     private static func checkReplayIntrinsics() -> Result {
         let values = [1375.836548, 0, 959.283203,
