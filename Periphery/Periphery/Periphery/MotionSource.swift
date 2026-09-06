@@ -244,11 +244,10 @@ final class MotionSource: NSObject, @unchecked Sendable {
                     bootSeconds: ProcessInfo.processInfo.systemUptime)
     }
 
-    /// The session's anchor is fixed at `start()` and never moved: re-anchoring
-    /// mid-session would step every republished CoreLocation timestamp
-    /// discontinuously, which is worse than the drift it would correct. Drift
-    /// is instead handled by RECORDING fresh anchors periodically as data, so
-    /// it is measurable offline rather than silently absorbed here.
+    /// Seed the conversion before the first CoreLocation callback. Each callback
+    /// refreshes this pair because the wall clock can step while the app remains
+    /// alive; keeping the launch-time pair would then put otherwise fresh GPS
+    /// fixes outside the video/IMU timeline.
     private func setAnchor() {
         let anchor = Self.sampleAnchor()
         lock.withLock { _anchor = anchor }
@@ -355,7 +354,11 @@ final class MotionSource: NSObject, @unchecked Sendable {
 extension MotionSource: CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        let anchor = clockAnchor
+        // CoreLocation timestamps are wall-clock NSDate values while camera and
+        // CoreMotion use the boot clock. Sample the relationship at delivery,
+        // rather than trusting a potentially stale app-start relationship.
+        let anchor = Self.sampleAnchor()
+        lock.withLock { _anchor = anchor }
         for location in locations {
             let wall = location.timestamp.timeIntervalSince1970
             let sample = Location(
@@ -380,7 +383,8 @@ extension MotionSource: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
         guard newHeading.headingAccuracy >= 0 else { return }
         lock.withLock { _latestTrueHeading = newHeading.trueHeading }
-        let anchor = clockAnchor
+        let anchor = Self.sampleAnchor()
+        lock.withLock { _anchor = anchor }
         let wall = newHeading.timestamp.timeIntervalSince1970
         onHeading?(Heading(timestamp: anchor.bootSeconds + (wall - anchor.wallSeconds),
                            wallTimestamp: wall,
