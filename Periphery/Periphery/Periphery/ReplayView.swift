@@ -155,6 +155,17 @@ struct ReplayView: View {
                     .frame(width: 112, alignment: .leading)
                 Slider(value: $cameraRight, in: 0.0...1.0, step: 0.05)
             }
+            HStack(spacing: 8) {
+                Text(String(format: "EMA alpha %.2f", model.replayEMAAlpha))
+                    .frame(width: 112, alignment: .leading)
+                Slider(value: Binding(
+                    get: { model.replayEMAAlpha },
+                    set: { model.setReplayEMAAlpha($0) }),
+                       in: 0.05...1.0, step: 0.05)
+            }
+            Text("0.30 default · 1.00 raw · lower is smoother")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.65))
         }
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(.white.opacity(0.9))
@@ -216,6 +227,9 @@ final class ReplayModel: ObservableObject {
     @Published var selected: URL?
     @Published var frames: [ReplayFrameSummary] = []
     @Published var displayFrames: [ReplayDisplayFrame] = []
+    /// Replay-only position smoothing. The raw sidecar remains untouched;
+    /// this setting rebuilds only the frames used by the display.
+    @Published private(set) var replayEMAAlpha = 0.30
     @Published var position = 0.0
     @Published var progress = 0.0
     @Published var processing = false
@@ -232,6 +246,7 @@ final class ReplayModel: ObservableObject {
     @Published var memoryLine = "available memory —"
     private var processor: ReplayProcessor?
     private var playTask: Task<Void, Never>?
+    private var rawDisplayFrames: [ReplayDisplayFrame] = []
     private var replayStarted = Date()
     private var priorIdleTimerDisabled = false
     let player = AVPlayer()
@@ -244,7 +259,8 @@ final class ReplayModel: ObservableObject {
     func refresh() { drives = DriveRecorder.sessions() }
     func select(_ drive: URL) {
         selected = drive; frames = ReplayProcessor.loadSummaries(drive: drive)
-        displayFrames = ReplayProcessor.loadDisplayFrames(drive: drive)
+        rawDisplayFrames = ReplayProcessor.loadDisplayFrames(drive: drive)
+        displayFrames = smoothedDisplayFrames(rawDisplayFrames)
         player.replaceCurrentItem(with: AVPlayerItem(
             url: drive.appendingPathComponent("video.mov")))
         position = 0; message = frames.isEmpty ? "No replay sidecar yet." : "Loaded replay-safety40-v1.jsonl"
@@ -298,7 +314,8 @@ final class ReplayModel: ObservableObject {
                 }
                 await MainActor.run {
                     self.frames = result; self.position = 0; self.processing = false
-                    self.displayFrames = ReplayProcessor.loadDisplayFrames(drive: drive)
+                    self.rawDisplayFrames = ReplayProcessor.loadDisplayFrames(drive: drive)
+                    self.displayFrames = self.smoothedDisplayFrames(self.rawDisplayFrames)
                     self.finishProcessing()
                     self.message = "Replay complete; versioned sidecar saved."
                 }
@@ -317,6 +334,16 @@ final class ReplayModel: ObservableObject {
     }
 
     func cancel() { processor?.cancel() }
+    func setReplayEMAAlpha(_ value: Double) {
+        replayEMAAlpha = min(max(value, 0.05), 1.0)
+        let oldTimestamp = currentDisplayFrame?.summary.timestamp
+        displayFrames = smoothedDisplayFrames(rawDisplayFrames)
+        if let oldTimestamp {
+            position = Double(nearestFrameIndex(to: oldTimestamp))
+            seekVideo()
+        }
+    }
+
     func step(_ amount: Int) {
         playing = false; playTask?.cancel()
         player.pause()
@@ -348,7 +375,52 @@ final class ReplayModel: ObservableObject {
 
     func closePlayback() {
         playing = false; playTask?.cancel(); player.pause()
-        displayFrames = []
+        displayFrames = []; rawDisplayFrames = []
+    }
+
+    private struct EMAState {
+        var x: Double
+        var y: Double
+        var z: Double
+        var timestamp: Double
+    }
+
+    /// Smooth replay positions after tracking has finished. This deliberately
+    /// does not run for live frames and does not change association, state,
+    /// velocity decisions, or the recorded sidecar.
+    private func smoothedDisplayFrames(_ source: [ReplayDisplayFrame])
+        -> [ReplayDisplayFrame] {
+        guard replayEMAAlpha < 0.999 else { return source }
+        var stateByID: [Int: EMAState] = [:]
+        var trailByID: [Int: [VehicleTrailPoint]] = [:]
+        let alpha = replayEMAAlpha
+
+        return source.map { frame in
+            var smoothed = frame
+            smoothed.objects = frame.objects.map { original in
+                var object = original
+                if let prior = stateByID[object.id],
+                   frame.summary.timestamp - prior.timestamp <= 0.5 {
+                    object.x = alpha * object.x + (1.0 - alpha) * prior.x
+                    object.y = alpha * object.y + (1.0 - alpha) * prior.y
+                    object.z = alpha * object.z + (1.0 - alpha) * prior.z
+                }
+                stateByID[object.id] = EMAState(x: object.x, y: object.y,
+                                                 z: object.z,
+                                                 timestamp: frame.summary.timestamp)
+
+                var trail = trailByID[object.id, default: []]
+                trail.append(VehicleTrailPoint(timestamp: frame.summary.timestamp,
+                                               x: object.x, y: object.y))
+                trail.removeAll {
+                    frame.summary.timestamp - $0.timestamp > 1.5
+                }
+                trailByID[object.id] = trail
+                object.trail = trail
+                return object
+            }
+            return smoothed
+        }
     }
 
     private func nearestFrameIndex(to timestamp: Double) -> Int {
