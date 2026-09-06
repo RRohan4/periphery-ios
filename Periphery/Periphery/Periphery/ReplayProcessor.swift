@@ -61,7 +61,7 @@ final class ReplayProcessor: @unchecked Sendable {
         drive.appendingPathComponent("replay-safety40-v1.jsonl")
     }
 
-    func process(drive: URL, progress: @escaping @Sendable (ReplayProgress) -> Void) throws
+    func process(drive: URL, progress: @escaping @Sendable (ReplayProgress) -> Void) async throws
         -> [ReplayFrameSummary] {
         lock.withLock { cancelled = false }
         let manifest = try loadManifest(drive)
@@ -71,8 +71,8 @@ final class ReplayProcessor: @unchecked Sendable {
         let speeds = try loadSpeeds(drive.appendingPathComponent("location.csv"))
         guard !rows.isEmpty else { throw ReplayError.invalid("frames.csv is empty") }
 
-        let asset = AVAsset(url: drive.appendingPathComponent("video.mov"))
-        guard let track = asset.tracks(withMediaType: .video).first else {
+        let asset = AVURLAsset(url: drive.appendingPathComponent("video.mov"))
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw ReplayError.missing("video track")
         }
         let reader = try AVAssetReader(asset: asset)

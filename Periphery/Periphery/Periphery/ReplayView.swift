@@ -25,7 +25,8 @@ struct ReplayView: View {
                             Text(model.pipelineLine).font(.system(.caption2, design: .monospaced))
                             Text("thermal · \(model.thermal)")
                                 .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(model.thermal == "nominal" ? .secondary : .orange)
+                                .foregroundStyle(model.thermal == "nominal"
+                                    ? Color.secondary : Color.orange)
                             Text("Keep Replay open. Auto-lock is disabled during this run.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -95,7 +96,7 @@ final class ReplayModel: ObservableObject {
         message = "Running the shared perception engine…"
         Task.detached {
             do {
-                let result = try worker.process(drive: drive) { update in
+                let result = try await worker.process(drive: drive) { update in
                     Task { @MainActor in
                         self.processedFrames = update.completed; self.totalFrames = update.total
                         self.progress = Double(update.completed) / Double(max(update.total, 1))
