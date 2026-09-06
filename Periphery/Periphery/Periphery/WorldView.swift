@@ -125,12 +125,12 @@ private struct WorldCamera {
     let focal: Double
 
     init(size: CGSize) {
-        width = size.width
-        height = size.height
+        let viewWidth = Double(size.width)
+        let viewHeight = Double(size.height)
         let tilt = 27.0 * .pi / 180.0
         let targetX = 18.0, targetZ = 0.9
-        let f = height / (2 * tan(26.0 * .pi / 360.0))
-        let margin = min(30.0, min(width, height) * 0.08)
+        let f = viewHeight / (2 * tan(26.0 * .pi / 360.0))
+        let margin = min(30.0, min(viewWidth, viewHeight) * 0.08)
         func fits(_ distance: Double) -> Bool {
             let cameraX = targetX - distance * cos(tilt)
             let cameraZ = targetZ + distance * sin(tilt)
@@ -139,11 +139,11 @@ private struct WorldCamera {
                     let dx = x - cameraX, dz = -cameraZ
                     let depth = dx * cos(tilt) - dz * sin(tilt)
                     guard depth > 0.5 else { return false }
-                    let sx = width / 2 - y * f / depth
-                    let sy = height / 2
+                    let sx = viewWidth / 2 - y * f / depth
+                    let sy = viewHeight / 2
                         - (dx * sin(tilt) + dz * cos(tilt)) * f / depth
-                    if sx < margin || sx > width - margin
-                        || sy < margin || sy > height - margin { return false }
+                    if sx < margin || sx > viewWidth - margin
+                        || sy < margin || sy > viewHeight - margin { return false }
                 }
             }
             return true
@@ -154,6 +154,8 @@ private struct WorldCamera {
             if fits(middle) { high = middle } else { low = middle }
         }
         let distance = high
+        width = viewWidth
+        height = viewHeight
         camX = targetX - distance * cos(tilt)
         camZ = targetZ + distance * sin(tilt)
         fx = cos(tilt); fz = -sin(tilt)
