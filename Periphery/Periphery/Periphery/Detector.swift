@@ -234,6 +234,11 @@ final class Detector {
     /// So this records `strides` against what dense packing would imply, and
     /// samples each tensor BOTH ways. If the two readings differ, the transfer
     /// is the bug and not the model.
+    ///
+    /// COST: walks every element of `array` TWICE and is O(elements x rank) in
+    /// integer divides. On the five tensors in `detect` that is ~1.0 M elements
+    /// per call site. Never call this on a per-frame path -- go through
+    /// `dumpTensors`, whose @autoclosure keeps it to once per launch.
     static func describe(_ array: MLMultiArray, _ name: String,
                          sample: Int = 24) -> [String: Any] {
         let shape = array.shape.map { $0.intValue }
@@ -295,13 +300,23 @@ final class Detector {
     /// Written once per launch to Documents, next to the drives.
     private static var dumpWritten = false
 
-    static func dumpTensors(_ entries: [[String: Any]]) {
+    /// `entries` is an @autoclosure ON PURPOSE, and this is not a style choice.
+    ///
+    /// This guard used to sit here while the call site passed an array literal of
+    /// five `describe(...)` results. Swift evaluates arguments eagerly, so the
+    /// guard skipped only the file write -- every frame still walked 1,044,928
+    /// tensor elements twice, through an ObjC property fetch and a per-axis
+    /// integer divide each. It cost 70 ms per frame and was charged to
+    /// `timing.head`, which made it look like the head model was slow.
+    ///
+    /// Deferring evaluation is what makes the guard mean what it reads as.
+    static func dumpTensors(_ entries: @autoclosure () -> [[String: Any]]) {
         guard !dumpWritten else { return }
         dumpWritten = true
         let payload: [String: Any] = [
             "note": "Tensor transfers use reported strides. firstLinear is diagnostic only; "
                   + "firstViaStrides is the logical order passed to decode. sigmoid(0)=0.5.",
-            "tensors": entries,
+            "tensors": entries(),
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload,
                                                      options: [.prettyPrinted, .sortedKeys]),
