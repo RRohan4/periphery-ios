@@ -24,23 +24,32 @@ struct RecordedVideoView: UIViewRepresentable {
 
 struct ReplayView: View {
     @StateObject private var model = ReplayModel()
+    /// Deliberately local, brittle demo controls. They affect only the replay
+    /// drawing and never rewrite the recorded sidecar or touch inference.
+    @State private var demoHeight = 1.50
+    @State private var cameraRight = 0.50
 
     @ViewBuilder
     var body: some View {
-        if let frame = model.currentDisplayFrame, !model.processing {
+        if let displayFrame = demoDisplayFrame, !model.processing {
             ZStack {
-                PerceptionSplitView(objects: frame.objects,
-                                    calibration: frame.calibration,
-                                    egoSpeed: frame.egoSpeed,
-                                    sourceLabel: "replay") {
+                PerceptionSplitView(objects: displayFrame.objects,
+                                    calibration: displayFrame.calibration,
+                                    egoSpeed: displayFrame.egoSpeed,
+                                    cameraRight: cameraRight) {
                     RecordedVideoView(player: model.player)
                 }
-                replayControls(frame)
+                replayControls(displayFrame)
             }
             .statusBarHidden()
         } else {
             replayBrowser
         }
+    }
+
+    private var demoDisplayFrame: ReplayDisplayFrame? {
+        model.currentDisplayFrame?.demoAdjusted(height: demoHeight,
+                                                cameraRight: cameraRight)
     }
 
     private var replayBrowser: some View {
@@ -105,6 +114,7 @@ struct ReplayView: View {
                 Button("Reprocess") { model.reprocess() }
             }
             Spacer()
+            demoCalibrationControls
             HStack {
                 Button("◀︎") { model.step(-1) }
                 Button(model.playing ? "Pause" : "Play") { model.togglePlay() }
@@ -118,6 +128,75 @@ struct ReplayView: View {
         .buttonStyle(.borderedProminent)
         .font(.caption)
         .padding(10)
+    }
+
+    private var demoCalibrationControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("DEMO CALIBRATION — REPLAY ONLY")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.65))
+            HStack(spacing: 8) {
+                Text(String(format: "height %.2f m", demoHeight))
+                    .frame(width: 112, alignment: .leading)
+                Slider(value: $demoHeight, in: 1.0...2.0, step: 0.01)
+            }
+            HStack(spacing: 8) {
+                Text(String(format: "camera right %.2f m", cameraRight))
+                    .frame(width: 112, alignment: .leading)
+                Slider(value: $cameraRight, in: 0.0...1.0, step: 0.05)
+            }
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.9))
+        .padding(8)
+        .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private extension ReplayDisplayFrame {
+    /// Apply the user's temporary demo geometry to an already-produced replay.
+    /// This mirrors the offline height rescale, then translates camera-relative
+    /// lateral coordinates into the vehicle-centreline frame. It is intentionally
+    /// not part of ReplayProcessor or the perception pipeline.
+    func demoAdjusted(height: Double, cameraRight: Double) -> ReplayDisplayFrame {
+        guard let source = calibration else { return self }
+        let sourceHeight = source.calibration.height
+        let scale = sourceHeight > 1e-6 ? height / sourceHeight : 1.0
+
+        let adjustedObjects = objects.map { original -> TrackedVehicle in
+            var object = original
+            object.x *= scale
+            object.y = object.y * scale - cameraRight
+            object.z *= scale
+            object.length *= scale
+            object.width *= scale
+            object.height *= scale
+            if let velocity = object.velocity {
+                object.velocity = velocity * scale
+            }
+            object.trail = object.trail.map {
+                VehicleTrailPoint(timestamp: $0.timestamp,
+                                  x: $0.x * scale,
+                                  y: $0.y * scale - cameraRight)
+            }
+            return object
+        }
+
+        var pose = source.calibration.pose
+        pose.height = height
+        let correctedCalibration = Calibration(
+            pose: pose,
+            K: source.calibration.K,
+            frameWidth: source.calibration.frameWidth,
+            frameHeight: source.calibration.frameHeight)
+        var adjustedSnapshot = source
+        adjustedSnapshot.calibration = correctedCalibration
+        adjustedSnapshot.guides = correctedCalibration.groundGuides()
+
+        return ReplayDisplayFrame(summary: summary,
+                                  objects: adjustedObjects,
+                                  calibration: adjustedSnapshot,
+                                  egoSpeed: egoSpeed)
     }
 }
 

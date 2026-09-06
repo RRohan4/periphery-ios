@@ -112,8 +112,7 @@ struct LiveView: View {
     var body: some View {
         PerceptionSplitView(objects: model.snapshot.trackedObjects,
                             calibration: model.snapshot.calibration,
-                            egoSpeed: model.snapshot.speed,
-                            sourceLabel: "live") {
+                            egoSpeed: model.snapshot.speed) {
             ZStack {
                 Color.black
                 if let session = model.session {

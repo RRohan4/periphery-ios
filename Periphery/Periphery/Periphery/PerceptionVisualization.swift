@@ -24,6 +24,9 @@ enum PerceptionColour {
 struct CameraBoxOverlay: View {
     let objects: [TrackedVehicle]
     let calibration: PerceptionCalibrationSnapshot?
+    /// Replay-only presentation correction. Positive means the camera is to
+    /// the vehicle's right; live remains on the pipeline's zero-offset path.
+    var cameraRight: Double = 0
 
     var body: some View {
         Canvas { context, size in
@@ -39,7 +42,8 @@ struct CameraBoxOverlay: View {
 
             for object in objects {
                 let corners = Self.projectedCorners(object,
-                                                    calibration: calibration.calibration)
+                                                    calibration: calibration.calibration,
+                                                    cameraRight: cameraRight)
                 guard corners.count == 8 else { continue }
                 let points = corners.map(display)
                 var path = Path()
@@ -75,7 +79,8 @@ struct CameraBoxOverlay: View {
     }
 
     static func projectedCorners(_ object: TrackedVehicle,
-                                 calibration: Calibration) -> [SIMD2<Double>] {
+                                 calibration: Calibration,
+                                 cameraRight: Double = 0) -> [SIMD2<Double>] {
         let c = cos(object.yaw), s = sin(object.yaw)
         let bottom = object.z - object.height / 2
         let top = object.z + object.height / 2
@@ -87,19 +92,42 @@ struct CameraBoxOverlay: View {
                 let localX = p.x * object.length, localY = p.y * object.width
                 let point = SIMD3(object.x + localX * c - localY * s,
                                   object.y + localX * s + localY * c, z)
-                guard let projected = calibration.sourcePoint(point) else { return [] }
+                guard let projected = sourcePoint(point, calibration: calibration,
+                                                  cameraRight: cameraRight) else { return [] }
                 result.append(projected)
             }
         }
         return result
     }
 
+    /// Presentation-only version of Calibration.sourcePoint that can move the
+    /// virtual camera sideways without changing production calibration.
+    /// Vehicle coordinates use y-left, so a camera 0.5 m right sits at -0.5 m.
+    private static func sourcePoint(_ vehicle: SIMD3<Double>,
+                                    calibration: Calibration,
+                                    cameraRight: Double) -> SIMD2<Double>? {
+        guard abs(cameraRight) > 1e-9 else { return calibration.sourcePoint(vehicle) }
+        let rotation = Calibration.vehicleToSensor(pitch: calibration.pose.pitch,
+                                                   roll: calibration.pose.roll,
+                                                   yaw: calibration.pose.yaw)
+        let camera = SIMD3<Double>(calibration.forwardOfOrigin,
+                                   -cameraRight,
+                                   calibration.height)
+        let image = Contract.sensorToImageAxes * (rotation * (vehicle - camera))
+        guard image.z > 1e-6 else { return nil }
+        let projected = calibration.K * image
+        return SIMD2<Double>(projected.x / projected.z,
+                             projected.y / projected.z)
+    }
+
     /// A coast is presentable only while the predicted box still overlaps the
     /// pixels the detector actually saw. This distinguishes a temporary visual
     /// occlusion (wiper, glare, another car) from an object that left the lens.
     static func remainsInInferenceView(_ object: TrackedVehicle,
-                                       snapshot: PerceptionCalibrationSnapshot) -> Bool {
-        let points = projectedCorners(object, calibration: snapshot.calibration)
+                                       snapshot: PerceptionCalibrationSnapshot,
+                                       cameraRight: Double = 0) -> Bool {
+        let points = projectedCorners(object, calibration: snapshot.calibration,
+                                      cameraRight: cameraRight)
         guard points.count == 8,
               let minX = points.map(\.x).min(), let maxX = points.map(\.x).max(),
               let minY = points.map(\.y).min(), let maxY = points.map(\.y).max()
@@ -119,7 +147,7 @@ struct PerceptionSplitView<CameraContent: View>: View {
     let objects: [TrackedVehicle]
     let calibration: PerceptionCalibrationSnapshot?
     let egoSpeed: Double
-    let sourceLabel: String
+    let cameraRight: Double
     let cameraContent: CameraContent
 
     /// Show a brief coast for an object that should still be visible (for
@@ -130,17 +158,18 @@ struct PerceptionSplitView<CameraContent: View>: View {
         objects.filter { object in
             if object.observed { return true }
             guard let calibration else { return false }
-            return CameraBoxOverlay.remainsInInferenceView(object, snapshot: calibration)
+            return CameraBoxOverlay.remainsInInferenceView(object, snapshot: calibration,
+                                                           cameraRight: cameraRight)
         }
     }
 
     init(objects: [TrackedVehicle], calibration: PerceptionCalibrationSnapshot?,
-         egoSpeed: Double, sourceLabel: String,
+         egoSpeed: Double, cameraRight: Double = 0,
          @ViewBuilder cameraContent: () -> CameraContent) {
         self.objects = objects
         self.calibration = calibration
         self.egoSpeed = egoSpeed
-        self.sourceLabel = sourceLabel
+        self.cameraRight = cameraRight
         self.cameraContent = cameraContent()
     }
 
@@ -155,7 +184,9 @@ struct PerceptionSplitView<CameraContent: View>: View {
                 VStack(spacing: gap) {
                     cameraContent
                         .overlay {
-                            CameraBoxOverlay(objects: displayedObjects, calibration: calibration)
+                            CameraBoxOverlay(objects: displayedObjects,
+                                             calibration: calibration,
+                                             cameraRight: cameraRight)
                         }
                         .aspectRatio(2.0, contentMode: .fill)
                         .frame(width: cameraWidth)
@@ -172,10 +203,6 @@ struct PerceptionSplitView<CameraContent: View>: View {
     private var hud: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Circle().fill(PerceptionColour.moving).frame(width: 7, height: 7)
-                Text(sourceLabel.uppercased())
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundStyle(PerceptionColour.moving)
                 Spacer()
                 Text("PERIPHERY")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
