@@ -32,6 +32,8 @@ struct ContentView: View {
                 .tabItem { Label("Live", systemImage: "car.side") }
             RecordView()
                 .tabItem { Label("Record", systemImage: "record.circle") }
+            ReplayView()
+                .tabItem { Label("Replay", systemImage: "play.rectangle") }
             CalibrationView()
                 .tabItem { Label("Calibrate", systemImage: "level") }
             FlowView()

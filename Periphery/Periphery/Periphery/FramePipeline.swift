@@ -75,6 +75,8 @@ final class FramePipeline: @unchecked Sendable {
     let foe = FocusOfExpansion()
     private var engine: PerceptionEngine?
     private let egoMotion = LiveEgoMotion()
+    private let perceptionLock = NSLock()
+    private var perceptionEnabled = true
     private var busy = false
     private var dropped = 0
     private var lastFrameTime: DispatchTime?
@@ -243,6 +245,13 @@ final class FramePipeline: @unchecked Sendable {
         egoMotion.reset()
     }
 
+    /// Replay owns the accelerator while reprocessing. Capture and raw sensor
+    /// recording may continue, but two perception engines never compete.
+    func setPerceptionEnabled(_ enabled: Bool) {
+        perceptionLock.withLock { perceptionEnabled = enabled }
+        if enabled { engine?.resetTemporalState(); egoMotion.reset() }
+    }
+
     // MARK: Cold-start pose
 
     private func startMotion() {
@@ -352,6 +361,8 @@ final class FramePipeline: @unchecked Sendable {
         }
         let estimate = foe.estimate
         acceptFOE(estimate)
+
+        guard perceptionLock.withLock({ perceptionEnabled }) else { return }
 
         guard !busy else { dropped += 1; return }
         busy = true
