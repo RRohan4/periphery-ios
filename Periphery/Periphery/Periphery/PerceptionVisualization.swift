@@ -38,7 +38,8 @@ struct CameraBoxOverlay: View {
             }
 
             for object in objects {
-                let corners = Self.corners(object, calibration: calibration.calibration)
+                let corners = Self.projectedCorners(object,
+                                                    calibration: calibration.calibration)
                 guard corners.count == 8 else { continue }
                 let points = corners.map(display)
                 var path = Path()
@@ -73,8 +74,8 @@ struct CameraBoxOverlay: View {
                        y: offsetY + point.y * scale)
     }
 
-    private static func corners(_ object: TrackedVehicle,
-                                calibration: Calibration) -> [SIMD2<Double>] {
+    static func projectedCorners(_ object: TrackedVehicle,
+                                 calibration: Calibration) -> [SIMD2<Double>] {
         let c = cos(object.yaw), s = sin(object.yaw)
         let bottom = object.z - object.height / 2
         let top = object.z + object.height / 2
@@ -92,6 +93,24 @@ struct CameraBoxOverlay: View {
         }
         return result
     }
+
+    /// A coast is presentable only while the predicted box still overlaps the
+    /// pixels the detector actually saw. This distinguishes a temporary visual
+    /// occlusion (wiper, glare, another car) from an object that left the lens.
+    static func remainsInInferenceView(_ object: TrackedVehicle,
+                                       snapshot: PerceptionCalibrationSnapshot) -> Bool {
+        let points = projectedCorners(object, calibration: snapshot.calibration)
+        guard points.count == 8,
+              let minX = points.map(\.x).min(), let maxX = points.map(\.x).max(),
+              let minY = points.map(\.y).min(), let maxY = points.map(\.y).max()
+        else { return false }
+        let box = CGRect(x: minX, y: minY,
+                         width: max(maxX - minX, 1), height: max(maxY - minY, 1))
+        let crop = snapshot.crop
+        let inferenceRegion = CGRect(x: crop.x, y: crop.y,
+                                     width: crop.width, height: crop.height)
+        return box.intersects(inferenceRegion)
+    }
 }
 
 /// Product display shared by live camera and recorded replay. The caller owns
@@ -103,10 +122,17 @@ struct PerceptionSplitView<CameraContent: View>: View {
     let sourceLabel: String
     let cameraContent: CameraContent
 
-    /// Coasting remains tracker-internal so a brief miss can recover the same
-    /// ID. The rider display only presents boxes supported by the current
-    /// image; predicted motion after an object leaves view is not evidence.
-    private var displayedObjects: [TrackedVehicle] { objects.filter(\.observed) }
+    /// Show a brief coast for an object that should still be visible (for
+    /// example behind a windshield wiper), but not after its predicted box has
+    /// actually left the detector's image region. Tracker state is retained in
+    /// both cases; this is only the presentation boundary.
+    private var displayedObjects: [TrackedVehicle] {
+        objects.filter { object in
+            if object.observed { return true }
+            guard let calibration else { return false }
+            return CameraBoxOverlay.remainsInInferenceView(object, snapshot: calibration)
+        }
+    }
 
     init(objects: [TrackedVehicle], calibration: PerceptionCalibrationSnapshot?,
          egoSpeed: Double, sourceLabel: String,
