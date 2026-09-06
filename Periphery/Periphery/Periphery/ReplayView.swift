@@ -1,5 +1,6 @@
 import Combine
 import SwiftUI
+import UIKit
 
 struct ReplayView: View {
     @StateObject private var model = ReplayModel()
@@ -21,6 +22,13 @@ struct ReplayView: View {
                                  + String(format: "%.1f%%", model.progress * 100))
                                 .font(.system(.caption, design: .monospaced))
                             Text(model.rateLine).font(.system(.caption2, design: .monospaced))
+                            Text(model.pipelineLine).font(.system(.caption2, design: .monospaced))
+                            Text("thermal · \(model.thermal)")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(model.thermal == "nominal" ? .secondary : .orange)
+                            Text("Keep Replay open. Auto-lock is disabled during this run.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             Button("Cancel", role: .destructive) { model.cancel() }
                         } else {
                             Button("Reprocess entire drive") { model.reprocess() }
@@ -59,9 +67,12 @@ final class ReplayModel: ObservableObject {
     @Published var playing = false
     @Published var message: String?
     @Published var rateLine = "starting…"
+    @Published var pipelineLine = "waiting for first frame…"
+    @Published var thermal = "nominal"
     private var processor: ReplayProcessor?
     private var playTask: Task<Void, Never>?
     private var replayStarted = Date()
+    private var priorIdleTimerDisabled = false
 
     func refresh() { drives = DriveRecorder.sessions() }
     func select(_ drive: URL) {
@@ -77,33 +88,47 @@ final class ReplayModel: ObservableObject {
         let worker = ReplayProcessor(); processor = worker; processing = true; progress = 0
         processedFrames = 0; totalFrames = 0
         replayStarted = Date(); rateLine = "starting…"
+        pipelineLine = "waiting for first frame…"; thermal = "nominal"
         LiveSession.shared.pipeline.suspendForReplay()
+        priorIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
         message = "Running the shared perception engine…"
         Task.detached {
             do {
-                let result = try worker.process(drive: drive) { done, total in
+                let result = try worker.process(drive: drive) { update in
                     Task { @MainActor in
-                        self.processedFrames = done; self.totalFrames = total
-                        self.progress = Double(done) / Double(max(total, 1))
+                        self.processedFrames = update.completed; self.totalFrames = update.total
+                        self.progress = Double(update.completed) / Double(max(update.total, 1))
                         let elapsed = max(Date().timeIntervalSince(self.replayStarted), 0.001)
-                        let fps = Double(done) / elapsed
-                        let remaining = fps > 0 ? Double(max(total - done, 0)) / fps : 0
-                        self.rateLine = String(format: "%.1f fps · elapsed %.0fs · ETA %.0fs",
+                        let fps = Double(update.completed) / elapsed
+                        let remaining = fps > 0
+                            ? Double(max(update.total - update.completed, 0)) / fps : 0
+                        self.rateLine = String(format: "avg %.1f fps · elapsed %.0fs · ETA %.0fs",
                                                fps, elapsed, remaining)
+                        self.pipelineLine = String(
+                            format: "latest raw %d · tracked %d · pre %.1f ms · inference %.1f ms",
+                            update.latest.rawCount, update.latest.trackCount,
+                            update.preprocessMS, update.inferenceMS)
+                        self.thermal = Benchmark.describe(ProcessInfo.processInfo.thermalState)
                     }
                 }
                 await MainActor.run {
                     self.frames = result; self.position = 0; self.processing = false
-                    LiveSession.shared.pipeline.resumeAfterReplay()
+                    self.finishProcessing()
                     self.message = "Replay complete; versioned sidecar saved."
                 }
             } catch {
                 await MainActor.run {
                     self.processing = false; self.message = String(describing: error)
-                    LiveSession.shared.pipeline.resumeAfterReplay()
+                    self.finishProcessing()
                 }
             }
         }
+    }
+
+    private func finishProcessing() {
+        LiveSession.shared.pipeline.resumeAfterReplay()
+        UIApplication.shared.isIdleTimerDisabled = priorIdleTimerDisabled
     }
 
     func cancel() { processor?.cancel() }

@@ -13,6 +13,14 @@ struct ReplayFrameSummary: Codable, Sendable {
     var trackCount: Int
 }
 
+struct ReplayProgress: Sendable {
+    var completed: Int
+    var total: Int
+    var latest: ReplayFrameSummary
+    var preprocessMS: Double
+    var inferenceMS: Double
+}
+
 final class ReplayProcessor: @unchecked Sendable {
     enum ReplayError: Error, CustomStringConvertible {
         case missing(String), invalid(String), cancelled
@@ -53,7 +61,7 @@ final class ReplayProcessor: @unchecked Sendable {
         drive.appendingPathComponent("replay-safety40-v1.jsonl")
     }
 
-    func process(drive: URL, progress: @escaping @Sendable (Int, Int) -> Void) throws
+    func process(drive: URL, progress: @escaping @Sendable (ReplayProgress) -> Void) throws
         -> [ReplayFrameSummary] {
         lock.withLock { cancelled = false }
         let manifest = try loadManifest(drive)
@@ -97,6 +105,8 @@ final class ReplayProcessor: @unchecked Sendable {
         var rateIndex = 0
         var speedIndex = 0
         var frameIndex = 0
+        var latestPreprocessMS = 0.0
+        var latestInferenceMS = 0.0
 
         while let sample = output.copyNextSampleBuffer() {
             if lock.withLock({ cancelled }) { reader.cancelReading(); throw ReplayError.cancelled }
@@ -124,7 +134,14 @@ final class ReplayProcessor: @unchecked Sendable {
             summaries.append(summary)
             try line(Self.encode(result: result, summary: summary), to: file)
             frameIndex += 1
-            if frameIndex.isMultiple(of: 10) { progress(frameIndex, rows.count) }
+            latestPreprocessMS = result.timings.preprocessMS
+            latestInferenceMS = result.timings.inferenceMS
+            if frameIndex.isMultiple(of: 10) {
+                progress(ReplayProgress(completed: frameIndex, total: rows.count,
+                                        latest: summary,
+                                        preprocessMS: result.timings.preprocessMS,
+                                        inferenceMS: result.timings.inferenceMS))
+            }
         }
         guard reader.status == .completed else {
             throw ReplayError.invalid(reader.error?.localizedDescription ?? "video decode")
@@ -137,7 +154,12 @@ final class ReplayProcessor: @unchecked Sendable {
             try FileManager.default.moveItem(at: temporary, to: destination)
         }
         completed = true
-        progress(frameIndex, frameIndex)
+        if let latest = summaries.last {
+            progress(ReplayProgress(completed: frameIndex, total: frameIndex,
+                                    latest: latest,
+                                    preprocessMS: latestPreprocessMS,
+                                    inferenceMS: latestInferenceMS))
+        }
         return summaries
     }
 
