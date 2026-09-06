@@ -1,49 +1,5 @@
-//  FocusOfExpansion.swift
-//  Drive-time mount pitch from the camera alone.
-//
-//  WHY THIS EXISTS
-//
-//  Gravity measures `mount + road grade` and cannot separate them: over 237
-//  comma2k19 segments the gravity-referenced pitch regresses on grade with
-//  slope +1.006 -- one for one -- costing 2.45 deg p95 against a 1.00 deg
-//  failure line. A shipped constant is no better: the same physical mount
-//  repeats to 0.149 deg, but across remounts the spread is 2.94 deg.
-//
-//  Optical flow radiates from the direction the camera is travelling. That
-//  point, the focus of expansion, is the vanishing point of the travel
-//  direction, so the angle between it and the optical axis IS the mount pitch
-//  against travel -- exactly the quantity Calibration wants, and the one that
-//  is immune to grade, because on a hill the travel direction and the camera
-//  tilt together and the angle between them does not move.
-//
-//  MEASURED, on comma2k19 with carrier-phase GNSS/INS pose as truth:
-//    * mean absolute error 0.103 deg over five daylight segments, all inside
-//      the 0.25 deg design budget;
-//    * 400 frame pairs (~20 s of straight driving) to converge to 0.08-0.23 deg;
-//    * regressed on road grade the slope is ~0 where there is enough grade
-//      range to identify one (5.83 deg of range gave 0.004), against +1.006
-//      for gravity. Hills are not a problem and need no gate;
-//    * de-rotation improves the estimate on all five segments, by 0.00-0.12 deg.
-//      Small only because the yaw-rate gate already removes the large rotations.
-//
-//  NOT PROVEN, and the reason `state` says so out loud:
-//    * NIGHT FAILS. On the one night segment tested, 950 gated pairs produced
-//      752 with usable flow and ZERO with a RANSAC consensus. The only
-//      trackable features after dark are headlights and reflections, which move
-//      independently of the road. This failure is self-announcing -- no
-//      consensus, no estimate -- which is why it is safe to run anyway.
-//    * A systematic +0.10 deg bias appeared on all five segments, same sign.
-//      Inside budget, and NOT calibrated out here: five segments is not enough
-//      to fit a constant to.
-//
-//  HOW MOVING CARS ARE EXCLUDED
-//
-//  RANSAC, not object detection. Flow from the static world all points away
-//  from one shared point; flow from a car moving independently does not agree
-//  with it. Repeatedly fitting a candidate focus to two random vectors and
-//  counting how many others agree finds the largest consistent set, which is
-//  the road, buildings and signs -- everything nailed down. Vehicles are
-//  outliers and are dropped without ever being recognised as vehicles.
+// Estimates mount pitch from optical flow and gyro de-rotation. RANSAC selects
+// the static-scene consensus; accepted estimates may update the driving pose.
 
 import Accelerate
 import CoreMedia
@@ -52,10 +8,6 @@ import Foundation
 import Vision
 import simd
 
-/// Mount pitch (and, for free, mount yaw) from the focus of expansion.
-///
-/// Frames are fed from the capture queue; all work happens on this object's
-/// own serial queue and a frame is dropped rather than queued if it is busy.
 final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - Constants that are not negotiable
@@ -63,24 +15,7 @@ final class FocusOfExpansion: @unchecked Sendable {
     /// Flow shorter than this in the WORKING image is discarded: its direction
     /// is dominated by the flow field's own quantisation.
     static let minFlowPixels = 1.5
-    /// Time between the two frames of a pair, seconds. NOT a frame count.
-    ///
-    /// This used to be a bare stride of 3, which silently meant 150 ms on
-    /// comma2k19's 20 fps footage where it was validated and 100 ms on a 30 fps
-    /// phone. Porting a frame count across two capture rates changes the
-    /// measurement; porting a duration does not.
-    ///
-    /// Swept on comma2k19 from 50 to 400 ms. Per-pair scatter is FLAT across
-    /// that whole range (0.60-0.69 deg) -- at highway speed even a 50 ms gap
-    /// gives far more flow than the noise floor needs, so nothing is starved
-    /// and shortening the gap does not hurt. Accuracy after 20 s of road is
-    /// therefore just "more pairs is better": 0.030 deg at 50 ms rising to
-    /// 0.098 deg at 400 ms.
-    ///
-    /// Every one of those is inside the 0.25 deg budget, so this is chosen for
-    /// COST, not accuracy. 100 ms converges to 0.043 deg in 20 s at a tenth of
-    /// the flow passes per second that 50 ms would need. Shorten it only if
-    /// convergence time turns out to matter more than thermal headroom.
+
     static let pairSeconds = 0.100
     /// Fallback until the real frame interval is known.
     static let defaultFrameStride = 3
@@ -94,16 +29,6 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - Gates
 
-    /// What the estimator will accept, and what it is allowed to do with the
-    /// answer.
-    ///
-    /// Two profiles, and the distinction between them matters more than the
-    /// numbers. `driving` is the one validated on comma2k19 and the only one
-    /// permitted to write the mount pose. `handheld` exists so the whole path
-    /// can be exercised on foot -- which is how the sign conventions get
-    /// checked without a car -- and is FORBIDDEN from touching the pose,
-    /// because the angle it measures is the angle of your hand, not the angle
-    /// of the mount. Nothing about that is a tuning preference.
     struct Gates: Sendable, Equatable {
         /// Ground speed floor, m/s. Negative disables the gate entirely.
         var minSpeed: Double
@@ -130,19 +55,6 @@ final class FocusOfExpansion: @unchecked Sendable {
                                    writesToPose: true,
                                    name: "driving")
 
-        /// Walking pace, indoors or out.
-        ///
-        /// No speed gate: CoreLocation reports nothing useful indoors and
-        /// walking is ~1.4 m/s regardless. That is affordable here because
-        /// handheld scenes are CLOSE -- flow scales as speed/depth, and a wall
-        /// three metres away at walking pace gives more pixels of flow than a
-        /// building 200 m away at 30 m/s.
-        ///
-        /// The yaw gate is loose on purpose. A hand swings far more than a
-        /// windshield mount, so holding it at 1.5 deg/s would reject
-        /// everything -- and letting rotation through is precisely how you find
-        /// out whether de-rotation is really working. A short window so the
-        /// number visibly follows the phone when you tilt it.
         static let handheld = Gates(minSpeed: -1.0,
                                     maxYawRateDegrees: 8.0,
                                     windowSize: 60,
@@ -174,9 +86,7 @@ final class FocusOfExpansion: @unchecked Sendable {
         /// Robust spread of the window: half the 16th-84th percentile gap,
         /// which is a one-sigma equivalent that outliers cannot inflate.
         var sigmaDegrees: Double = 0
-        /// The same pitch with de-rotation SKIPPED. Shown, never used: if this
-        /// is not close to `pitchDegrees` the gyro-to-camera axis mapping is
-        /// wrong, and that is a bug you want visible rather than absorbed.
+
         var pitchWithoutDerotationDegrees: Double = 0
         /// Samples in the window, out of `windowSize`.
         var samples: Int = 0
@@ -199,10 +109,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         var acceptRate: Double = 0
     }
 
-    /// What one frame pair actually looked like, for the Flow tab to draw.
-    ///
-    /// Only filled when `publishDebug` is set, because it copies a few hundred
-    /// vectors per pair and the driving path has no use for them.
     struct Debug: Sendable {
         /// Working-image size the coordinates below are in.
         var width = 0
@@ -214,17 +120,9 @@ final class FocusOfExpansion: @unchecked Sendable {
         /// so what is drawn is what the fit actually consumed.
         var points: [SIMD2<Float>] = []
         var vectors: [SIMD2<Float>] = []
-        /// Per sample: did it agree with the winning focus? This is the whole
-        /// point of the tab -- a moving car shows up as a coherent patch of
-        /// outliers, without anything having recognised it as a car.
+
         var inlier: [Bool] = []
-        /// The window median focus, in the same pixels as `foe`.
-        ///
-        /// Drawn alongside the per-pair one because the difference between them
-        /// IS the story: a single pair scatters by ~0.6 deg (measured on
-        /// comma2k19, and the same in every flow method tried), while the median
-        /// over the window lands inside 0.1 deg. Showing only the jumping cross
-        /// makes a working estimator look broken.
+
         var medianFoe: SIMD2<Double>?
         /// This pair alone, not the window median.
         var pitchDegrees: Double = 0
@@ -266,11 +164,6 @@ final class FocusOfExpansion: @unchecked Sendable {
     private var poolWidth = 0
     private var poolHeight = 0
 
-    /// Intrinsics carried onto the working image. Computed on the CAPTURE
-    /// queue where the frame is, handed across as a value, and stored only from
-    /// the estimator's own queue -- sharing four mutable Doubles between two
-    /// queues is exactly the kind of race that shows up as a pitch number that
-    /// is subtly wrong once an hour.
     private struct Optics {
         var fx = 1.0, fy = 1.0, cx = 0.0, cy = 0.0
         init() {}
@@ -324,12 +217,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         }
     }
 
-    /// Feed a camera frame. Cheap on the caller's queue: one downscale, then
-    /// the work moves off. Frames are dropped, never queued.
-    ///
-    /// `calibration` supplies the source intrinsics and the roll currently
-    /// applied to the pose -- roll has to be undone before the focus of
-    /// expansion can be split into pitch and yaw.
     func feed(frame: CameraSession.Frame,
               calibration: Calibration,
               speed: Double) {
@@ -338,10 +225,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         frameCounter += 1
         guard frameCounter % frameStride == 0 else { return }
 
-        // Gate BEFORE the downscale: below the floor there is nothing to
-        // measure and the scale is pure waste. A negative floor disables it,
-        // which is what handheld mode wants -- CoreLocation reports nothing
-        // useful indoors.
         let floor = gates.minSpeed
         if floor >= 0, !(speed >= floor) {
             publishGate(String(format: "speed %.1f m/s < %.0f", max(speed, 0), floor))
@@ -373,9 +256,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         }
     }
 
-    /// Track the camera's actual frame interval and pick the stride that lands
-    /// closest to `pairSeconds`. A 30 fps camera gets 3, a 60 fps camera gets 6,
-    /// and both measure the same thing.
     private func updateStride(at time: Double) {
         defer { lastFeedTime = time }
         guard lastFeedTime > 0 else { return }
@@ -403,16 +283,8 @@ final class FocusOfExpansion: @unchecked Sendable {
         // thing that can move the focus of expansion without the car turning.
         let w = averageRotationRate(from: previousTime, to: time)
 
-        // Camera axes from device axes. From MotionSource.cameraRoll's
-        // derivation: image right u = -y_dev, image down v = -x_dev, optical
-        // w = -z_dev. An angular velocity is a vector, so its components in
-        // that basis are the dot products, giving (-w.y, -w.x, -w.z).
         let wCam = SIMD3<Double>(-w.y, -w.x, -w.z)
 
-        // Yaw is rotation about the camera's DOWN axis, which for a windshield
-        // mount is roughly vertical -- not device z, which points back at the
-        // driver. Gating the wrong axis would pass turns and reject straight
-        // road, which is the opposite of the intent.
         let yawRate = abs(wCam.y) * 180.0 / .pi
         guard yawRate <= gates.maxYawRateDegrees else {
             publishGate(String(format: "turning %.1f deg/s", yawRate))
@@ -525,9 +397,6 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - Sampling the flow field
 
-    /// Vision hands back a two-channel float32 buffer the size of the input.
-    /// Take a coarse grid of it, drop anything too short to have a trustworthy
-    /// direction, and keep the rest.
     private func sample(flow: CVPixelBuffer,
                         points: inout [SIMD2<Double>],
                         vectors: inout [SIMD2<Double>]) {
@@ -556,17 +425,6 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - De-rotation
 
-    /// Subtract the flow a known rotation would have produced.
-    ///
-    /// This works exactly, with no knowledge of the scene, because ROTATIONAL
-    /// FLOW IS DEPTH-INDEPENDENT: a rotating camera drags a point 5 m away and
-    /// a point 500 m away through the same image displacement. Translational
-    /// flow, the part carrying the signal, scales as 1/depth and is untouched.
-    ///
-    /// Near the principal point this reduces to: yaw slides the field
-    /// sideways, pitch slides it vertically, roll spins it. The vertical one is
-    /// the danger -- a vertical slide moves the focus of expansion's row, and
-    /// that row IS the pitch.
     private func derotate(points: [SIMD2<Double>],
                           vectors: [SIMD2<Double>],
                           omega: SIMD3<Double>,
@@ -586,13 +444,6 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - RANSAC
 
-    /// The focus of expansion is the point every translational flow vector
-    /// points away from, so it lies on the LINE through each sample along its
-    /// own flow direction. Two lines fix a candidate; the rest vote.
-    ///
-    /// Note what this does NOT need: it never identifies a vehicle, and it does
-    /// not care which endpoint of the flow indexes each sample, because both
-    /// endpoints lie on the same ray out of the focus.
     private func ransac(points: [SIMD2<Double>],
                         vectors: [SIMD2<Double>],
                         iterations: Int = 200,
@@ -600,14 +451,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         let n = points.count
         guard n >= Self.minInliers else { return nil }
 
-        // Each sample becomes a line in normal form: normal . p = offset, where
-        // the normal is the flow direction turned 90 degrees.
-        //
-        // Degenerate vectors are DROPPED, not zeroed. A zero normal satisfies
-        // `normal . p == offset` for every candidate point, so leaving one in
-        // would make it a free inlier for every hypothesis and quietly inflate
-        // the consensus that decides whether this frame is trustworthy at all.
-        // De-rotation can produce one whenever it nearly cancels the flow.
         var normals = [SIMD2<Double>]()
         var offsets = [Double]()
         normals.reserveCapacity(n)
@@ -622,9 +465,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         let count = normals.count
         guard count >= Self.minInliers else { return nil }
 
-        // Deterministic per call: a seeded generator, so the same pair of
-        // frames always yields the same answer and a disagreement between runs
-        // is a real change rather than a different draw.
         var seed: UInt64 = 0x9E3779B97F4A7C15
         func next(_ bound: Int) -> Int {
             seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
@@ -651,9 +491,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         }
         guard let seedPoint = best, bestCount >= Self.minInliers else { return nil }
 
-        // Refit on the consensus set: total least squares on the inlier lines,
-        // which is where the sub-pixel accuracy actually comes from. RANSAC
-        // only picks the set.
         var m00 = 0.0, m01 = 0.0, m11 = 0.0, r0 = 0.0, r1 = 0.0
         var inliers = 0
         for i in 0..<count {
@@ -685,22 +522,10 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - Focus of expansion -> mount angles
 
-    /// Invert Calibration.vehicleToSensor at the direction of travel.
-    ///
-    /// `sourceVanishingPoint((1,0,0))` maps straight-ahead to a pixel; the
-    /// focus of expansion IS that pixel, measured instead of predicted. Running
-    /// it backwards gives the pitch and yaw that would have produced it.
-    ///
-    /// Roll has to come out first, because a rolled camera mixes the vertical
-    /// and horizontal offsets into each other.
     private func pitchAndYaw(foe: SIMD2<Double>, roll: Double) -> (pitch: Double, yaw: Double) {
         Self.mountAngles(foe: foe, fx: fx, fy: fy, cx: cx, cy: cy, roll: roll)
     }
 
-    /// The inversion itself, free of any instance state so SelfCheck can drive
-    /// it against Calibration.sourceVanishingPoint and prove the round trip.
-    /// Three sign conventions meet in here and a flipped one would look like a
-    /// plausible mount angle, not like a crash.
     static func mountAngles(foe: SIMD2<Double>,
                             fx: Double, fy: Double, cx: Double, cy: Double,
                             roll: Double) -> (pitch: Double, yaw: Double) {
@@ -708,9 +533,7 @@ final class FocusOfExpansion: @unchecked Sendable {
         let direction = simd_normalize(SIMD3<Double>((foe.x - cx) / fx,
                                                      (foe.y - cy) / fy,
                                                      1.0))
-        // Image axes back to ISO 8855 sensor axes (x forward, y left, z up).
-        // sensorToImageAxes is a signed permutation, so its inverse is its
-        // transpose.
+
         let sensor = Contract.sensorToImageAxes.transpose * direction
         // Undo Rx(-roll), leaving Ry(pitch) * Rz(-yaw) applied to (1, 0, 0),
         // which is (cos p cos y, -sin y, -sin p cos y).
@@ -803,12 +626,6 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - Gyro averaging
 
-    /// Mean rotation rate over the pair's interval, in device axes.
-    ///
-    /// Not the latest sample: at 30 deg/s, 10 ms of timing error is 0.3 deg,
-    /// the entire pitch budget. CoreMotion and CMSampleBuffer share the
-    /// mach_absolute_time domain, so these timestamps are directly comparable
-    /// with no conversion.
     private func averageRotationRate(from start: Double, to end: Double) -> SIMD3<Double> {
         let samples = lock.withLock { gyro }
         var sum = SIMD3<Double>.zero
@@ -828,9 +645,7 @@ final class FocusOfExpansion: @unchecked Sendable {
     private func opticalFlow(from first: CVPixelBuffer,
                              to second: CVPixelBuffer) -> CVPixelBuffer? {
         let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: second)
-        // .low is a coarser pyramid, not a smaller output. The fit consumes
-        // thousands of vectors and rejects outliers, so paying for .high here
-        // buys accuracy the RANSAC would have thrown away.
+
         request.computationAccuracy = .low
         request.outputPixelFormat = kCVPixelFormatType_TwoComponent32Float
         let handler = VNImageRequestHandler(cvPixelBuffer: first, options: [:])

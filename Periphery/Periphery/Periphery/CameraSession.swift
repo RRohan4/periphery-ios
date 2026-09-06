@@ -1,35 +1,3 @@
-//  CameraSession.swift
-//  Live frames, with the two settings this pipeline cannot work without.
-//
-//  1. Video stabilisation OFF. EIS and OIS change per-frame geometry without
-//     reporting it, which breaks both the fixed intrinsics the focal-matched
-//     crop is computed from and the known extrinsics the LUT is built from.
-//     Apple confirms the incompatibility implicitly: intrinsic matrix delivery
-//     is unavailable while stabilisation is on.
-//  2. Intrinsic matrix delivery ON. The crop that lands on the trained focal is
-//     computed from the live K, not guessed.
-//
-//  FOCUS. Autofocus moves the lens, which moves the focal length, which
-//  silently rescales every range estimate. So the lens must not wander during a
-//  drive. That much was right.
-//
-//  What was wrong was the number. This used to hard-code
-//  `setFocusModeLocked(lensPosition: 1.0)` with the comment "1.0 is the far end
-//  of the lens range". It is -- but the far MECHANICAL end is not the same as
-//  infinity FOCUS. Voice-coil actuators are built with overtravel past infinity
-//  so that infinity stays reachable across temperature and unit-to-unit spread,
-//  so parking at 1.0 lands past focus and everything distant goes soft. There is
-//  no portable constant for infinity: it is a different number on every unit.
-//
-//  A blurry frame is not a cosmetic problem here. Optical flow is differences of
-//  local intensity, and blur is a low-pass filter -- it removes exactly the
-//  high-frequency content the flow field is computed from. Soft focus degrades
-//  the pitch estimator far more than it degrades the detector.
-//
-//  So focus is now FOUND rather than guessed: autofocus, restricted to the far
-//  range, until someone locks it. `Calibration` shows the lens position and
-//  whether it is locked, because an unlocked lens is a real caveat on every
-//  range and must not be silent.
 
 import AVFoundation
 import CoreMedia
@@ -48,26 +16,14 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         /// The buffer itself, kept so the recorder can hand it to an
         /// AVAssetWriter without a second capture path.
         let sampleBuffer: CMSampleBuffer
-        /// Host time clock -- the same mach_absolute_time domain CoreMotion and
-        /// CMAltimeter stamp their samples in, so video, IMU and barometer share
-        /// a timeline with no conversion. CoreLocation does not; see
-        /// MotionSource's clock anchor.
+
         let presentationTime: CMTime
-        /// Exposure time in seconds.
-        ///
-        /// Recorded because it is the direct measure of MOTION BLUR, and blur is
-        /// what starves optical flow: at 30 m/s a 1/60 s exposure smears a point
-        /// 20 m away across several pixels, which is the same order as the flow
-        /// being measured. Without this, a drive where the estimator quietly
-        /// degraded at dusk is indistinguishable from one where the maths is
-        /// wrong.
+
         let exposureSeconds: Double
         /// Sensor gain. High ISO means a noisy image, which is the other way
         /// flow quality dies.
         let iso: Double
-        /// Where the lens is, 0-1. Constant if the focus lock is holding; if it
-        /// moves, the focal length moved with it and every range in that stretch
-        /// carries a scale error.
+
         let lensPosition: Double
     }
 
@@ -85,12 +41,6 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    /// Where the lens sits, and whether it is allowed to move.
-    ///
-    /// `autoFar` is the honest default: the correct lens position for infinity
-    /// is device-specific and cannot be hard-coded, so let the camera find it.
-    /// `locked` is what a measured drive wants, at a position someone chose by
-    /// looking at the picture.
     enum FocusPolicy: Equatable {
         case autoFar
         case locked(Float)
@@ -175,9 +125,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         defer { device.unlockForConfiguration() }
         switch policy {
         case .autoFar:
-            // Restricting the range keeps the camera from racking to macro on
-            // the dashboard or a raindrop on the glass, which is the failure
-            // this restriction exists for.
+
             if device.isAutoFocusRangeRestrictionSupported {
                 device.autoFocusRangeRestriction = .far
             }
@@ -192,13 +140,6 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         policy.save()
     }
 
-    /// Freeze the lens exactly where autofocus has just put it.
-    ///
-    /// This is the whole point: the right lens position for infinity is a
-    /// property of the individual camera, so the only reliable way to get it is
-    /// to let autofocus find it on a distant scene and then stop the lens
-    /// moving. `currentLensPosition` is Apple's sentinel for "lock here",
-    /// which avoids a read-then-write race against a lens still in motion.
     @discardableResult
     func lockFocusHere() -> Float {
         guard let device, (try? device.lockForConfiguration()) != nil else { return 0 }
@@ -266,9 +207,6 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 extension CameraSession.FocusPolicy {
     private static let key = "CameraSession.FocusPolicy.v1"
 
-    /// A locked position belongs to one physical phone, so it survives a
-    /// restart. It does NOT survive a reset, and it should not: a value carried
-    /// over from another unit would be worse than none.
     static func load(from defaults: UserDefaults = .standard) -> Self {
         guard let value = defaults.object(forKey: key) as? Double else { return .autoFar }
         return .locked(Float(value))

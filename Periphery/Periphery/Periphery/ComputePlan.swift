@@ -1,21 +1,5 @@
-//  ComputePlan.swift
-//  Which compute unit does each operation actually land on?
-//
-//  The op inventory (conv, relu, add, upsample, concat, max_pool for the
-//  backbone; conv, relu, add, reshape, transpose, stack for the head) says only
-//  that nothing is inherently unsupported. It does NOT say where Core ML puts
-//  them. Placement is chosen at load time, per operation, and a graph can be
-//  split into segments that hand off between the ANE and the CPU -- where the
-//  handoffs cost more than the ops.
-//
-//  MLComputePlan (iOS 17+) reports that decision without running anything. It
-//  is the substitute for Instruments' Core ML template, which needs a
-//  USB-tethered device and is therefore unavailable when the Mac is rented.
-//
-//  Two caveats worth stating whenever a number from here is quoted:
-//    * this is the PLANNED placement, not a measurement of executed work;
-//    * in the simulator there is no Neural Engine, so everything reports CPU or
-//      GPU and the answer is meaningless. Run it on the phone.
+// Reports Core ML's planned per-operation compute placement. These are
+// estimates, not measurements of executed work; simulator results omit ANE.
 
 import CoreML
 import Foundation

@@ -1,20 +1,5 @@
-//  LiveView.swift
-//  The Live screen: camera preview, bird's-eye view, and the stats strip.
-//
-//  The pipeline lives in FramePipeline.swift and the renderer in WorldView.swift.
-//  What is left here is SwiftUI and the main-actor model that feeds it.
-//
-//  LANDSCAPE. The app is landscape-locked and this screen gives the world view
-//  the majority of the width, with camera evidence and HUD beside it. That is not a taste
-//  decision. The capture buffer is landscape however the phone is held, so a
-//  portrait mount does not rotate the image, it lays the road sideways across a
-//  crop computed for the other axis -- see MotionSource.cameraRoll. A screen
-//  that stacks a 16:9 preview above a world view in portrait wastes most of the
-//  glass on letterboxing and shows both panes too small to read while driving.
-//
-//  Intrinsics come live from AVFoundation. Pitch starts from gravity, which
-//  absorbs road grade one-for-one (2.45 deg p95 over 237 segments), and is
-//  superseded by the camera estimator in FocusOfExpansion once it converges.
+// Live camera screen. FramePipeline supplies snapshots; this file owns the
+// SwiftUI layout, preview overlays, and main-actor model.
 
 import AVFoundation
 import Combine
@@ -30,11 +15,7 @@ struct CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.layer.session = session
         view.layer.videoGravity = .resizeAspectFill
-        // Zero rotation relative to the sensor's native readout, i.e. show the
-        // buffer exactly as it arrives. GroundGuideOverlay draws in SOURCE
-        // PIXELS and maps them with a single uniform scale, so any rotation
-        // here would silently slide the horizon off the road while leaving the
-        // number in the stats strip looking fine.
+
         pinRotation(view)
         return view
     }
@@ -60,15 +41,6 @@ struct CameraPreview: UIViewRepresentable {
 
 // MARK: - Ground guides over the preview
 
-/// The horizon and a ladder of ground-distance lines, drawn over the live
-/// image.
-///
-/// This is the cheapest honest check in the app. Pitch error is invisible as a
-/// number -- half a degree reads 40 m as 56 m and still looks like a plausible
-/// angle -- but the same error puts the horizon visibly off the road. Roll tips
-/// the line; yaw slides it sideways. Two of the three signs in
-/// `vehicleToSensor` have no golden vector behind them, so this is how they get
-/// checked: by looking.
 struct GroundGuideOverlay: View {
     let guides: GroundGuides
 
@@ -160,9 +132,6 @@ struct LiveView: View {
         .padding(8)
     }
 
-    /// The camera estimator, in one line. When it is not accumulating, the
-    /// reason is the point -- a night drive and a slow street look different,
-    /// and both look different from a bug.
     private func foeLine(_ foe: FocusOfExpansion.Estimate) -> some View {
         let text: String
         let colour: Color
@@ -180,12 +149,6 @@ struct LiveView: View {
     }
 }
 
-/// One camera, one pipeline, one recorder.
-///
-/// Live, Record and Calibrate are three views onto the same running session,
-/// so it cannot live inside any one of them -- and the camera cannot be opened
-/// twice. Recording in particular has to survive leaving the Live tab, which is
-/// why nothing here stops on `onDisappear`.
 @MainActor
 final class LiveSession: ObservableObject {
     static let shared = LiveSession()

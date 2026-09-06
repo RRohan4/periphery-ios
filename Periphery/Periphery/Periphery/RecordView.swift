@@ -1,17 +1,9 @@
-//  RecordView.swift
-//  Start a drive, watch it fill the disk, get it off the phone.
-//
-//  The export story is deliberately not a share sheet. A session is a DIRECTORY
-//  of eight files, and a share sheet per file is unusable at that shape --
-//  UIFileSharingEnabled and LSSupportsOpeningDocumentsInPlace put the whole
-//  Documents folder in Files and in Finder, so a drive drags out intact.
+// Start and export recorded drives. Each drive is exported as one directory so
+// its video, sensors, detections, and metadata stay together.
 
 import Combine
 import SwiftUI
 
-/// Footer copy, hoisted out of the ViewBuilders. A chain of `+`-concatenated
-/// literals inside a ViewBuilder is a well-known way to blow the type checker's
-/// budget; multi-line literals in a plain enum cost it nothing.
 private enum Help {
     static let whileRecording = """
         Encoding is real thermal load. The Latency tab's numbers are not valid while \

@@ -26,12 +26,7 @@ struct ReplayProgress: Sendable {
     var latest: ReplayFrameSummary
     /// The most recent frame's timings.
     var timings: PerceptionTimings
-    /// Running mean over the run so far, excluding the first frame.
-    ///
-    /// A single frame's timing is too noisy to apportion a budget with, and the
-    /// FIRST frame is not a sample at all -- it carries model load and the ANE's
-    /// first-run compilation. Read `mean`, not `timings`, when asking where the
-    /// time goes.
+
     var mean: PerceptionTimings
 
     var preprocessMS: Double { timings.preprocessMS }
@@ -157,9 +152,7 @@ final class ReplayProcessor: @unchecked Sendable {
         var accumulator = TimingAccumulator()
 
         while let sample = output.copyNextSampleBuffer() {
-            // Core ML and AVFoundation return autoreleased objects on every frame.
-            // A replay has no run-loop boundary to drain them, so without this pool
-            // tensors accumulate for thousands of frames until iOS jetsams the app.
+
             try autoreleasepool {
                 if lock.withLock({ cancelled }) {
                     reader.cancelReading()
@@ -355,9 +348,6 @@ final class ReplayProcessor: @unchecked Sendable {
         }
     }
 
-    /// `frames.csv` stores k00,k01,k02,k10,... in row-major order. SIMD
-    /// matrices are column-major internally, so using `columns:` here silently
-    /// transposes K and moves the principal point from (cx, cy) to (0, 0).
     static func intrinsics(fromRowMajorValues values: [Double]) -> simd_double3x3? {
         guard values.count == 9 else { return nil }
         return simd_double3x3(rows: [
@@ -387,10 +377,6 @@ final class ReplayProcessor: @unchecked Sendable {
         }
     }
 
-    /// CoreLocation timestamps originate on the wall clock. Recordings also carry
-    /// a republished boot-domain value, but older captures could write that value
-    /// with a fixed offset. Reconstruct from `t_wall` and the nearest recorded
-    /// anchor so GPS speed always shares the video/IMU timeline.
     static func bootTimestamp(recorded: Double, wall: Double?,
                               anchors: [ClockAnchor]) -> Double {
         guard let wall, wall.isFinite, !anchors.isEmpty else { return recorded }
@@ -456,10 +442,6 @@ final class ReplayProcessor: @unchecked Sendable {
         try file.write(contentsOf: Data((text + "\n").utf8))
     }
 
-    /// `timing_ms_fields` names the positions in each frame's `timing_ms`, so the
-    /// file stays self-describing as stages are added. Timings are the one part of
-    /// a sidecar that is NOT reproducible; nothing comparing two replays for
-    /// determinism should read them.
     private static func header(checkpoint: String) -> String {
         "{\"schema\":1,\"kind\":\"periphery-replay\",\"checkpoint\":\"\(checkpoint)\","
             + "\"tracker\":\"safety40-tracker-v1\",\"score_threshold\":0.5,"

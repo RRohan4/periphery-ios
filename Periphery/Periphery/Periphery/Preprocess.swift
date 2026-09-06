@@ -1,18 +1,5 @@
-//  Preprocess.swift
-//  Camera frame -> [1, 3, 256, 512] float32 network input.
-//
-//  Contract section 1. Two things that are easy to get wrong and expensive to
-//  debug:
-//
-//    * MEAN and STD are in 0-255 units. Divide by 255 first and every
-//      activation is off by two orders of magnitude.
-//    * The letterbox is filled with MEAN, so padding normalises to exactly
-//      zero. Padding with black injects a strong negative signal at the edges.
-//      Here the canvas is zeroed once and only the resized region is written,
-//      which is the same thing without the subtraction.
-//
-//  The crop comes from Calibration.focalMatchedCrop(): apparent scale is what
-//  the backbone learned, so the crop is not an optimisation, it is correctness.
+// Converts camera frames into the [1, 3, 256, 512] float32 network input. The
+// crop and normalization follow Contract and Calibration.
 
 import Accelerate
 import CoreML
@@ -45,12 +32,6 @@ final class Preprocessor {
         planes.forEach { free($0.data) }
     }
 
-    /// Fill `input` from a 32BGRA pixel buffer.
-    ///
-    /// Video stabilisation must be off on the capture session: EIS and OIS
-    /// change per-frame geometry unreported, which breaks both the fixed
-    /// intrinsics this crop is computed from and the known extrinsics the LUT
-    /// is built from.
     func fill(from pixelBuffer: CVPixelBuffer, crop: ImageCrop) throws -> MLMultiArray {
         guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
             throw DetectorError.unsupportedDataType("pixel buffer is not 32BGRA")

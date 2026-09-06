@@ -12,9 +12,7 @@ final class LiveEgoMotion: @unchecked Sendable {
 
     func append(attitude: MotionSource.Attitude) {
         lock.withLock {
-            // Project device-axis angular velocity onto gravity-up. At the
-            // nominal landscape mount this is +device-x, while this form also
-            // remains correct through the measured phone roll and pitch.
+
             let gravityLength = sqrt(attitude.gravity.x * attitude.gravity.x
                                    + attitude.gravity.y * attitude.gravity.y
                                    + attitude.gravity.z * attitude.gravity.z)

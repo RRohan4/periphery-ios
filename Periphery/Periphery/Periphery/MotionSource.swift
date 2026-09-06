@@ -1,30 +1,3 @@
-//  MotionSource.swift
-//  The one owner of CoreMotion, CoreLocation and the barometer.
-//
-//  Previously FramePipeline started its own CMMotionManager and delivered
-//  updates to `.main`, which put a 30 Hz attitude stream behind the UI's run
-//  loop and left nothing for anyone else to read. Every consumer -- the pose,
-//  the drive recorder, the pitch estimator -- wants the same samples, so there
-//  is one source and it publishes.
-//
-//  Three things here are easy to get wrong and expensive to debug:
-//
-//  1. THE REFERENCE FRAME. `attitude.yaw` is measured against whatever frame
-//     the manager started in. `CLLocation.course` is true north. They are only
-//     comparable under `.xTrueNorthZVertical`, which needs location
-//     authorisation to be live BEFORE motion starts. Get this wrong and
-//     `deviceYaw - course` is a random number that looks plausible.
-//
-//  2. THE CLOCK DOMAINS. CMDeviceMotion.timestamp and CMAltitudeData.timestamp
-//     are seconds since boot -- the mach_absolute_time domain, the same one
-//     CMSampleBufferGetPresentationTimeStamp uses, so motion, altimeter and
-//     video align for free. CLLocation.timestamp is an NSDate: WALL CLOCK, a
-//     different domain, and it can jump when network time updates. Everything
-//     here is republished in the boot domain, with the anchor recorded so the
-//     conversion is auditable rather than assumed.
-//
-//  3. THE CAMERA AXES. Roll is only meaningful against the camera's own axes,
-//     not the device's. See `cameraRoll`.
 
 import CoreLocation
 import CoreMotion
@@ -67,22 +40,13 @@ final class MotionSource: NSObject, @unchecked Sendable {
         var altitude: Double
         var horizontalAccuracy: Double
         var verticalAccuracy: Double
-        /// HORIZONTAL ground speed, m/s, Doppler. Negative means invalid.
-        /// There is no vertical-speed property, which is why the barometer is
-        /// not optional.
+
         var speed: Double
         var speedAccuracy: Double
         var course: Double
         var courseAccuracy: Double
     }
 
-    /// CLHeading, ~1 Hz. The magnetometer's own answer.
-    ///
-    /// An INDEPENDENT witness to the attitude-derived camera bearing: the two
-    /// come from different stacks, so agreement is evidence and a persistent 90
-    /// or 180 degree gap means an attitude convention is wrong. That check is
-    /// worth nothing offline unless the raw heading is on disk next to the
-    /// attitude, which is why this is recorded and not merely displayed.
     struct Heading: Sendable {
         var timestamp: TimeInterval
         var wallTimestamp: TimeInterval
@@ -98,9 +62,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
         var pressureKPa: Double
     }
 
-    /// Wall clock against boot clock, so CoreLocation can be placed on the same
-    /// timeline as the video and the IMU offline. Re-sampled periodically
-    /// because the wall clock drifts and can step.
     struct ClockAnchor: Sendable {
         var wallSeconds: TimeInterval
         var bootSeconds: TimeInterval
@@ -108,9 +69,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
 
     // MARK: - Configuration
 
-    /// 100 Hz. Note 13 wants attitude averaged over each accepted interval at
-    /// CoreMotion's own rate; pairing it with CoreLocation by index would
-    /// silently decimate it to 1 Hz.
     var attitudeRate = 100.0
 
     // MARK: - Outputs
@@ -136,11 +94,7 @@ final class MotionSource: NSObject, @unchecked Sendable {
     var latestAttitude: Attitude? { lock.withLock { _latestAttitude } }
     var latestLocation: Location? { lock.withLock { _latestLocation } }
     var latestAltitude: Altitude? { lock.withLock { _latestAltitude } }
-    /// CLHeading.trueHeading, degrees. An INDEPENDENT witness to
-    /// `Attitude.cameraHeading`: the two are derived from different stacks, so
-    /// a persistent 90 or 180 degree gap between them means the attitude-matrix
-    /// convention below is wrong. Surfaced in the Calibrate tab for exactly
-    /// that reason.
+
     var latestTrueHeading: Double? { lock.withLock { _latestTrueHeading } }
     var clockAnchor: ClockAnchor { lock.withLock { _anchor } }
 
@@ -161,9 +115,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
     private(set) var altimeterAvailable = false
     private(set) var running = false
 
-    /// True when `attitude.cameraHeading` means anything, i.e. when the
-    /// reference frame is true-north locked. Mount yaw is not computable
-    /// otherwise.
     var headingIsTrueNorth: Bool { referenceFrame == .xTrueNorthZVertical }
 
     override init() {
@@ -177,10 +128,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    /// Location first, then motion. The ordering is the point: the true-north
-    /// reference frame is only available once location services are authorised
-    /// and running, so starting motion first silently downgrades the frame and
-    /// mount yaw quietly becomes meaningless.
     func start() {
         guard !running else { return }
         running = true
@@ -235,19 +182,11 @@ final class MotionSource: NSObject, @unchecked Sendable {
         }
     }
 
-    /// A fresh reading of the wall clock against the boot clock, taken
-    /// adjacently. This is the pair that makes `CLLocation.timestamp` placeable
-    /// on the video's timeline; 10 ms of sync error at 30 deg/s is 0.3 deg, the
-    /// entire pitch budget, so it is not bookkeeping.
     static func sampleAnchor() -> ClockAnchor {
         ClockAnchor(wallSeconds: Date().timeIntervalSince1970,
                     bootSeconds: ProcessInfo.processInfo.systemUptime)
     }
 
-    /// Seed the conversion before the first CoreLocation callback. Each callback
-    /// refreshes this pair because the wall clock can step while the app remains
-    /// alive; keeping the launch-time pair would then put otherwise fresh GPS
-    /// fixes outside the video/IMU timeline.
     private func setAnchor() {
         let anchor = Self.sampleAnchor()
         lock.withLock { _anchor = anchor }
@@ -271,73 +210,24 @@ final class MotionSource: NSObject, @unchecked Sendable {
             cameraHeading: headingIsTrueNorth ? Self.cameraHeading(m.attitude) : nil)
     }
 
-    /// Camera elevation above horizontal, radians, positive nose-up.
-    ///
-    /// The rear camera looks along -z in device axes, so the elevation of the
-    /// optical axis is asin(g.z). Independent of roll, which is why it survives
-    /// any mounting rotation.
-    ///
-    /// This is `mount + road grade`. Gravity measures tilt against the EARTH
-    /// and cannot see past the road: measured over 237 drive segments it
-    /// regresses on grade with slope +1.006, costing 2.45 deg p95 against a
-    /// 1.00 deg failure line. A prior, never the answer.
     static func gravityPitch(_ gravity: SIMD3<Double>) -> Double {
         asin(max(-1.0, min(1.0, gravity.z)))
     }
 
-    /// Camera roll, radians, positive clockwise seen from behind the camera
-    /// (the camera's left side higher).
-    ///
-    /// Device axes are +x right, +y top edge, +z out of the screen. The rear
-    /// camera's native buffer needs a 90 degree CLOCKWISE rotation to sit
-    /// upright in portrait, which puts the buffer's left edge at the display's
-    /// top. That fixes the camera axes in device terms:
-    ///
-    ///     image right  u = -y      image down  v = -x      optical  w = -z
-    ///
-    /// and u x v = w confirms the handedness. Gravity's components in the image
-    /// plane are then g_u = -g.y and g_v = -g.x, and a camera rolled clockwise
-    /// tips gravity toward its left, i.e. toward -u. Hence:
-    ///
-    ///     roll = atan2(-g_u, g_v) = atan2(g.y, -g.x)
-    ///
-    /// Zero roll therefore means the device's +x edge points UP -- landscape,
-    /// rotated counterclockwise from portrait. A PORTRAIT MOUNT READS -90 deg,
-    /// which is the point: the capture buffer is always landscape regardless of
-    /// how the phone is held, so a portrait mount does not rotate the image, it
-    /// lays the road sideways across the crop. That is unrecoverable here, and
-    /// reading -90 is how it becomes visible instead of silent.
-    ///
-    /// Unlike pitch, roll is honestly measurable from gravity: its contaminant
-    /// is road camber, ~0.6 deg and mean-zero, not the 2.45 deg of grade.
     static func cameraRoll(_ gravity: SIMD3<Double>) -> Double {
         atan2(gravity.y, -gravity.x)
     }
 
-    /// Camera bearing, radians clockwise from true north.
-    ///
-    /// Only meaningful under `.xTrueNorthZVertical`, whose reference frame is
-    /// +x north, +z up, and therefore +y west. The rotation matrix maps the
-    /// reference frame into the device frame, so its transpose carries the
-    /// optical axis (-z in device axes) back out to world coordinates.
     static func cameraHeading(_ attitude: CMAttitude) -> Double {
         let m = attitude.rotationMatrix
-        // m maps the reference frame INTO the device frame, so carrying the
-        // optical axis back out uses the transpose. Transpose applied to
-        // (0, 0, -1) is the negated third ROW of m.
+
         let north = -m.m31
         let west = -m.m32
         return atan2(-west, north)
     }
 
-    /// Mount yaw: how far the camera points LEFT of the direction of travel,
-    /// radians. Nearly free once heading and course are both in hand, and not
-    /// optional -- 1 deg is 0.70 m of lateral error at 40 m, applied to every
-    /// box.
     static func mountYaw(cameraHeading: Double, course: Double) -> Double {
-        // Course is degrees clockwise from north; heading is radians the same
-        // way. Left of travel is counterclockwise, so the offset is
-        // course - heading.
+
         wrapToPi(course * .pi / 180.0 - cameraHeading)
     }
 
@@ -354,9 +244,7 @@ final class MotionSource: NSObject, @unchecked Sendable {
 extension MotionSource: CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        // CoreLocation timestamps are wall-clock NSDate values while camera and
-        // CoreMotion use the boot clock. Sample the relationship at delivery,
-        // rather than trusting a potentially stale app-start relationship.
+
         let anchor = Self.sampleAnchor()
         lock.withLock { _anchor = anchor }
         for location in locations {
@@ -398,10 +286,6 @@ extension MotionSource: CLLocationManagerDelegate {
         // condition in a garage, and the pose falls back to gravity.
     }
 
-    /// Authorisation can arrive after `start()`. The true-north reference frame
-    /// is unavailable until it does, so motion is restarted once it lands --
-    /// otherwise the app spends the whole drive on an arbitrary frame and mount
-    /// yaw is quietly meaningless.
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         guard running, !headingIsTrueNorth else { return }
         switch manager.authorizationStatus {

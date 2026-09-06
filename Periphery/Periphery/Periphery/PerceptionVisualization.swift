@@ -1,8 +1,5 @@
-//  PerceptionVisualization.swift
-//  Shared, read-only presentation adapter for Live and Replay.
-//
-//  This file projects already-decided tracked results. It does not associate,
-//  classify, smooth, suppress, or otherwise change perception state.
+// Shared presentation adapter for Live and Replay. It projects tracked results
+// without changing inference or tracking state.
 
 import SwiftUI
 import simd
@@ -100,9 +97,6 @@ struct CameraBoxOverlay: View {
         return result
     }
 
-    /// Presentation-only version of Calibration.sourcePoint that can move the
-    /// virtual camera sideways without changing production calibration.
-    /// Vehicle coordinates use y-left, so a camera 0.5 m right sits at -0.5 m.
     private static func sourcePoint(_ vehicle: SIMD3<Double>,
                                     calibration: Calibration,
                                     cameraRight: Double) -> SIMD2<Double>? {
@@ -120,9 +114,6 @@ struct CameraBoxOverlay: View {
                              projected.y / projected.z)
     }
 
-    /// Presentation-only line-of-sight test. The BEV radar is a forward FOV
-    /// sector, so an object is drawable while any part of its footprint remains
-    /// inside that same angular arc. This deliberately does not alter tracking.
     static func remainsInFieldOfViewArc(_ object: TrackedVehicle,
                                         focal: Double,
                                         cameraRight: Double = 0) -> Bool {
@@ -154,9 +145,6 @@ struct PerceptionSplitView<CameraContent: View>: View {
     let cameraRight: Double
     let cameraContent: CameraContent
 
-    /// Show an object only while its footprint remains inside the camera's
-    /// forward field-of-view arc. Tracker state is retained either way; this
-    /// is only the presentation boundary.
     private var displayedObjects: [TrackedVehicle] {
         objects.filter { object in
             guard let calibration else { return object.observed }

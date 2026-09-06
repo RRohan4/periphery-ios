@@ -1,40 +1,3 @@
-//  DriveRecorder.swift
-//  One drive = one directory: video, every sensor at its native rate, the
-//  detections the phone produced, and the clock anchors that tie them together.
-//
-//  This is note 6's step 0 -- "ship a logger, not an estimator" -- widened to
-//  carry frames. The reason for the widening is that it stops being a
-//  validation artefact and becomes a corpus generator. Every number in the
-//  periphery repo comes from comma2k19: a highway corpus, someone else's
-//  windshield, someone else's optics, and only two distinct devices. A drive
-//  recorded here replays through the same offline chain
-//  (fastbev_detect_comma -> track_comma -> build_comma_viewer) on your camera
-//  and your mount.
-//
-//  NOTHING IS RESAMPLED OR JOINED HERE. Each stream is written at its own rate
-//  with its own timestamps and alignment is resolved offline, exactly as note 6
-//  specifies. Pairing CoreMotion with CoreLocation on device would silently
-//  decimate a 100 Hz attitude stream to 1 Hz.
-//
-//  Layout:
-//      drive_2026-09-02_14-31-07/
-//        manifest.json      device, preset, checkpoint, pose, first video PTS
-//        video.mov          HEVC at the capture rate
-//        frames.csv         pts, the full per-frame K, exposure, ISO, lens
-//        motion.csv         gravity, user accel, rotation rate, quaternion
-//        location.csv       both clock domains, speed, course, accuracies
-//        altimeter.csv      relative altitude and pressure
-//        heading.csv        CLHeading -- the magnetometer's independent answer
-//        health.csv         thermal state, fps and drops, once a second
-//        anchors.csv        wall clock against boot clock, every 60 s
-//        detections.jsonl   what the on-device model saw, per frame
-//        tracks-v1.jsonl    versioned tracked state, velocity, trail and ego delta
-//
-//  Two things recording must not do. It must not block the capture queue: the
-//  writer runs on its own serial queue and a dropped RECORDING frame is
-//  preferable to a dropped DETECTION frame. And it must not be mistaken for a
-//  benchmark -- encoding is real thermal load, so the Latency tab's numbers are
-//  not valid while this is running.
 
 import AVFoundation
 import CoreMedia
@@ -136,9 +99,6 @@ final class DriveRecorder: @unchecked Sendable {
         }
     }
 
-    /// More than this many frames waiting on the writer queue and the next one
-    /// is dropped instead of queued. Bounded, so a slow encoder cannot grow the
-    /// backlog until the capture pool starves the detector.
     private static let maxInFlight = 4
 
     var isRecording: Bool { lock.withLock { _status.recording } }
@@ -147,12 +107,6 @@ final class DriveRecorder: @unchecked Sendable {
 
     // MARK: - Surviving the length of a drive
 
-    /// iOS stops the capture session the moment the app leaves the foreground,
-    /// and nothing on the way out calls `stop()`. The movie is then left with
-    /// its samples written but no `moov` atom, which does not decode -- so a
-    /// screen lock does not truncate a drive, it destroys it. Both halves of
-    /// that are handled here: the screen is held awake while recording, and if
-    /// the app is backgrounded anyway the file is closed properly.
     init() {
         backgroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
@@ -173,10 +127,6 @@ final class DriveRecorder: @unchecked Sendable {
         Task { @MainActor in UIApplication.shared.isIdleTimerDisabled = on }
     }
 
-    /// Backgrounded mid-drive. Frames have already stopped arriving, so the only
-    /// thing still worth doing is closing the file. A short drive that decodes
-    /// beats a long one that does not. The background-task assertion buys the
-    /// seconds `finishWriting` needs before the process is suspended.
     private func finalizeForBackground() {
         guard isRecording else { return }
         Task { @MainActor in
@@ -222,13 +172,6 @@ final class DriveRecorder: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    /// Whether the recorded streams mean anything.
-    ///
-    /// These are not statistics, they are validity flags. Heading is
-    /// meaningless outside the true-north reference frame; if intrinsics never
-    /// arrived, every K column in frames.csv is empty; if stabilisation stayed
-    /// on, the geometry moved per frame without saying so. Reading a drive back
-    /// without knowing these is guesswork, so they go in the manifest.
     struct Capture {
         var referenceFrame = ""
         var headingIsTrueNorth = false
@@ -236,11 +179,7 @@ final class DriveRecorder: @unchecked Sendable {
         var intrinsicsAvailable = false
         var altimeterAvailable = false
         var attitudeRateHz = 0.0
-        /// "locked at 0.83" or "auto (far)". A drive shot with the lens still
-        /// hunting has a focal length that moved during it, so every range in
-        /// that stretch carries a scale error -- and soft focus starves the
-        /// flow field the pitch estimator is built from. frames.csv has the
-        /// per-frame position; this says what the policy was meant to be.
+
         var focus = ""
     }
 
@@ -260,14 +199,7 @@ final class DriveRecorder: @unchecked Sendable {
 
         let movie = dir.appendingPathComponent("video.mov")
         let assetWriter = try AVAssetWriter(outputURL: movie, fileType: .mov)
-        // A .mov is only readable once `finishWriting` has appended its index.
-        // Until then the samples are all on disk and none of them can be
-        // decoded, so anything that kills the process mid-drive -- a jetsam
-        // kill, a crash, a battery pull -- costs the WHOLE recording rather
-        // than the tail of it. Fragments cap that loss: the writer flushes a
-        // self-describing index every interval, so an unfinalised file still
-        // decodes up to the last one. A drive is one irreplaceable shot; ten
-        // seconds is the most of it worth risking.
+
         assetWriter.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.hevc,
@@ -364,10 +296,6 @@ final class DriveRecorder: @unchecked Sendable {
 
     // MARK: - Sinks
 
-    /// Called on the CAPTURE queue. Retains the buffer, hands it to the writer
-    /// queue and returns immediately. If the writer is already `maxInFlight`
-    /// behind, the frame is dropped rather than queued -- detection latency is
-    /// the thing being protected.
     func append(frame: CameraSession.Frame) {
         guard isRecording else { return }
         let backlog = lock.withLock { () -> Bool in inFlight >= Self.maxInFlight }
@@ -410,10 +338,7 @@ final class DriveRecorder: @unchecked Sendable {
                 self.framesCSV?.row([Self.f(seconds, 6), "", "", "", "", "", "", "", "", "",
                                      String(width), String(height)] + optics)
             }
-            // Once a second: did the phone throttle, and did the frame rate
-            // survive it? A drive that thermally degraded halfway through looks
-            // exactly like a drive where the maths got worse, unless this is on
-            // disk.
+
             if seconds - self.lastHealth >= 1.0 {
                 self.lastHealth = seconds
                 let info = ProcessInfo.processInfo
@@ -476,9 +401,6 @@ final class DriveRecorder: @unchecked Sendable {
         }
     }
 
-    /// One JSON line per frame, keyed to the video's own presentation time.
-    /// Diffing this against the Python detector's output on the same frames is
-    /// the end-to-end float16 number the README currently lists as unquantified.
     func append(detections: [Detection], at pts: CMTime) {
         guard isRecording else { return }
         queue.async {
@@ -527,12 +449,6 @@ final class DriveRecorder: @unchecked Sendable {
 
     // MARK: - Housekeeping, on the writer queue
 
-    /// Clock anchors every 60 s and a free-space check every 10 s.
-    ///
-    /// The anchors are the only thing that lets CoreLocation's wall-clock
-    /// timestamps sit on the same timeline as the video offline. They are
-    /// RECORDED rather than applied, so wall-clock drift over a long drive
-    /// stays measurable instead of being silently absorbed.
     private func tick() {
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastAnchor > 60 || lastAnchor == 0 {
@@ -594,10 +510,7 @@ final class DriveRecorder: @unchecked Sendable {
                 "yaw_from": pose.yawFrom.rawValue,
                 "height_from": pose.heightFrom.rawValue,
             ],
-            // Whether the streams above can be trusted at all. Heading is
-            // meaningless outside the true-north frame; intrinsics that never
-            // arrived mean every K column is empty; stabilisation left on means
-            // the geometry moved per frame without saying so.
+
             "capture": [
                 "reference_frame": capture.referenceFrame,
                 "heading_is_true_north": capture.headingIsTrueNorth,
@@ -661,9 +574,6 @@ final class DriveRecorder: @unchecked Sendable {
 
 // MARK: - CSV
 
-/// Buffered append-only text. Flushes on a size threshold rather than per row:
-/// a 100 Hz stream is 100 write(2) calls a second otherwise, which is real cost
-/// on the writer queue for no benefit.
 private final class CSVWriter {
     private var handle: FileHandle?
     private var buffer = ""

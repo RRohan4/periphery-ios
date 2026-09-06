@@ -1,20 +1,3 @@
-//  Detector.swift
-//  backbone_static -> LUT gather -> head_static -> decode.
-//
-//  The two .mlpackages are plain convolution stacks; everything between and
-//  after them lives here. Models are addressed by resource name rather than by
-//  the generated Swift classes so that a re-export cannot silently rename the
-//  call site, and head outputs are identified by their trailing dimension
-//  (4 = classes, 9 = box codes, 2 = direction logits) rather than by the
-//  auto-generated coremltools output names.
-//
-//  On precision: an ML Program running on the Neural Engine works in float16
-//  and hands back float16 tensors, while the export declares float32 shapes and
-//  a simulator will happily give float32. Both are normal. Every tensor
-//  crossing the Core ML boundary is therefore converted through a float32
-//  scratch buffer rather than assumed -- the conversions are vImage planar
-//  passes over half a megabyte, which is cheap next to the convolutions, and
-//  the decode arithmetic stays in float32 where the goldens were computed.
 
 import Accelerate
 import CoreML
@@ -218,27 +201,6 @@ final class Detector {
 
     // MARK: - Raw tensor dump
 
-    /// Every tensor in the path, once per launch, written where Files can reach
-    /// it. This exists because of a specific failure: on-device the class head
-    /// scored 98.8% of its detections at EXACTLY 0.5, and sigmoid(0) = 0.5, so
-    /// the logits arriving at `Decode` were zero. The exported weights are not
-    /// zero -- the class biases are the usual focal-loss -3.9, which would put
-    /// background at 0.02 and produce no detections at all.
-    ///
-    /// The original failure was caused by copying `array.count` elements
-    /// straight off `dataPointer`. CoreML may hand back a padded tensor -- the
-    /// ANE pads to tile boundaries -- and `count` is the LOGICAL element count.
-    /// Transfers now walk the reported strides; this dump remains as the
-    /// device-side proof that the physical and logical layouts were identified.
-    ///
-    /// So this records `strides` against what dense packing would imply, and
-    /// samples each tensor BOTH ways. If the two readings differ, the transfer
-    /// is the bug and not the model.
-    ///
-    /// COST: walks every element of `array` TWICE and is O(elements x rank) in
-    /// integer divides. On the five tensors in `detect` that is ~1.0 M elements
-    /// per call site. Never call this on a per-frame path -- go through
-    /// `dumpTensors`, whose @autoclosure keeps it to once per launch.
     static func describe(_ array: MLMultiArray, _ name: String,
                          sample: Int = 24) -> [String: Any] {
         let shape = array.shape.map { $0.intValue }
@@ -300,16 +262,6 @@ final class Detector {
     /// Written once per launch to Documents, next to the drives.
     private static var dumpWritten = false
 
-    /// `entries` is an @autoclosure ON PURPOSE, and this is not a style choice.
-    ///
-    /// This guard used to sit here while the call site passed an array literal of
-    /// five `describe(...)` results. Swift evaluates arguments eagerly, so the
-    /// guard skipped only the file write -- every frame still walked 1,044,928
-    /// tensor elements twice, through an ObjC property fetch and a per-axis
-    /// integer divide each. It cost 70 ms per frame and was charged to
-    /// `timing.head`, which made it look like the head model was slow.
-    ///
-    /// Deferring evaluation is what makes the guard mean what it reads as.
     static func dumpTensors(_ entries: @autoclosure () -> [[String: Any]]) {
         guard !dumpWritten else { return }
         dumpWritten = true
@@ -373,13 +325,6 @@ final class Detector {
             .multiArrayConstraint?.dataType ?? .float32
     }
 
-    /// Plain `default`, not `@unknown default`: the SDK has grown a data type
-    /// this does not name, and `@unknown default` only absorbs cases that did
-    /// not exist at compile time, so a new KNOWN case leaves the switch
-    /// non-exhaustive. This is a label for a log line -- there is nothing to
-    /// handle per-type, so covering everything is the correct behaviour rather
-    /// than a silenced warning. The dtypes that must be understood are gated in
-    /// readFloats and writeFloats, which still throw on anything unexpected.
     private static func name(_ type: MLMultiArrayDataType) -> String {
         switch type {
         case .float16: return "float16"

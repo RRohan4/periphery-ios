@@ -1,9 +1,4 @@
-//
-//  PeripheryApp.swift
-//  Periphery
-//
-//  Created by Renuka.Raina on 2026-08-31.
-//
+// Application entry point.
 
 import SwiftUI
 

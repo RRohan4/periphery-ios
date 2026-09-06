@@ -1,27 +1,5 @@
-//
-//  ContentView.swift
-//  Periphery
-//
-//  Two screens, both of which answer a question before any camera exists:
-//
-//  Self-check  the golden vectors from Resources/ against the hand-written half
-//              of the port -- the half the CoreML export gate says nothing
-//              about. Six rows, all expected green.
-//  Compute     where Core ML plans to run each operation. Meaningless in the
-//              simulator (no Neural Engine); run it on the phone.
-//  Latency     the number the port exists for: per-frame cost of backbone,
-//              gather, head and decode, and whether it survives ten minutes.
-//  Live        the whole pipeline on camera frames, the 2.5D world view, and
-//              the horizon laid over the image so a bad pose is visible.
-//  Record      video, every sensor and the detections, into one directory per
-//              drive -- the corpus this project has never had of its own.
-//  Calibrate   the four numbers the projection depends on, ordered by how much
-//              damage each does when wrong.
-//  Flow        the camera pitch estimator made visible, on foot: walk forward
-//              and watch the focus of expansion, the inliers and the angle.
-//              Exercises the whole path -- Vision, gyro axes, three sign
-//              conventions -- in ten seconds, indoors, without a car.
-//
+// Root tab layout for diagnostics, live perception, recording, replay, and
+// calibration.
 
 import SwiftUI
 
@@ -302,9 +280,7 @@ struct BenchmarkView: View {
         // A ten-minute run outlives the screen timeout, and a locked screen
         // suspends the app mid-measurement.
         UIApplication.shared.isIdleTimerDisabled = true
-        // Off the main actor: the project uses the normal nonisolated default,
-        // and only UI models opt into MainActor. A long run therefore keeps
-        // publishing progress without wedging the interface.
+
         Task.detached(priority: .userInitiated) {
             do {
                 let outcome = try Benchmark.run(frames: frames,

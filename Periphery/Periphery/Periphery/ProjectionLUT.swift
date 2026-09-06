@@ -1,10 +1,5 @@
-//  ProjectionLUT.swift
-//  The geometry step between the two networks.
-//
-//  Ports periphery/training/model.py: _projection_lut and backproject. This is
-//  the op that was deliberately kept out of the CoreML graph -- it is a gather,
-//  not arithmetic, and it costs 0.3-0.5 ms on a desktop CPU. Both halves of the
-//  model stay plain convolution stacks because of it.
+// Calibration-dependent gather between the backbone and detection head. The LUT
+// is rebuilt when pose or intrinsics change, not for every frame.
 
 import Foundation
 import simd
@@ -52,12 +47,6 @@ struct ProjectionLUT {
         return Double(visibility.reduce(0, +)) / Double(visibility.count)
     }
 
-    /// Gather image features into the BEV volume.
-    ///
-    /// `features` is [1, 64, 64, 128] contiguous, `volume` is [1, 64, 41, 80, 2]
-    /// contiguous. Both flatten channel-major, and the voxel flatten order of
-    /// Contract.voxelPoints() is exactly the volume's trailing (gx, gy, gz), so
-    /// each channel is one contiguous run of gathers.
     func backproject(features: UnsafePointer<Float>,
                      volume: UnsafeMutablePointer<Float>,
                      channels: Int = Contract.featureChannels,

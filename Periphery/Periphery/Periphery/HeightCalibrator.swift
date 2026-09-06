@@ -1,21 +1,5 @@
-//  HeightCalibrator.swift
-//  Camera height from the barometric lift between the floor and the mount.
-//
-//  The physics works. Air pressure falls about 12 Pa per metre, so a 1.2 m lift
-//  is ~0.14 hPa against roughly 0.02 hPa of per-sample sensor noise. Averaged
-//  over a hold at each end that lands near +-5 cm, and height is forgiving
-//  anyway: d(range)/range = d(height)/height, a pure scale factor, so 5 cm is
-//  ~4% of range where the same effort spent on pitch buys far more.
-//
-//  THE LIMIT IS NOT SENSOR NOISE, IT IS CABIN PRESSURE. A door, the HVAC or a
-//  window moves the reading further than the 1.2 m being measured. That is why
-//  this reports the spread of its samples and the drift between the two holds
-//  rather than just a number, and why the slider stays the source of truth: a
-//  tape measure is +-2 cm and free.
-//
-//  CMAltimeter.relativeAltitude is a running total from when updates began, so
-//  as long as MotionSource keeps the altimeter alive the two holds are directly
-//  differenceable with no re-zeroing.
+// Estimates camera height from two barometer holds. The result includes sample
+// spread and hold-to-hold drift because cabin pressure can dominate sensor noise.
 
 import Combine
 import Foundation
@@ -57,9 +41,6 @@ final class HeightCalibrator: ObservableObject {
         var warnings: [String]
     }
 
-    /// Long enough to average down the noise, short enough that nobody gives
-    /// up. At ~1 Hz this is about 10 samples, so the standard error is roughly a
-    /// third of the per-sample noise.
     static let holdSeconds: TimeInterval = 10
 
     @Published private(set) var phase: Phase = .idle
@@ -99,9 +80,6 @@ final class HeightCalibrator: ObservableObject {
         holdStart = ProcessInfo.processInfo.systemUptime
     }
 
-    /// Fed from MotionSource's altimeter stream, ~1 Hz. Hopped to the main
-    /// actor by the caller; at that rate the cost is irrelevant and the
-    /// alternative is a lock around a UI-driven state machine.
     func feed(relativeAltitude: Double, at boot: TimeInterval) {
         guard phase == .floor || phase == .mount else { return }
         samples.append(relativeAltitude)

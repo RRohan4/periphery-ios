@@ -175,10 +175,7 @@ struct ReplayView: View {
 }
 
 private extension ReplayDisplayFrame {
-    /// Apply the user's temporary demo geometry to an already-produced replay.
-    /// This mirrors the offline height rescale, then translates camera-relative
-    /// lateral coordinates into the vehicle-centreline frame. It is intentionally
-    /// not part of ReplayProcessor or the perception pipeline.
+
     func demoAdjusted(height: Double, cameraRight: Double) -> ReplayDisplayFrame {
         guard let source = calibration else { return self }
         let sourceHeight = source.calibration.height
@@ -297,10 +294,7 @@ final class ReplayModel: ObservableObject {
                             format: "latest raw %d · tracked %d · pre %.1f ms · inference %.1f ms",
                             update.latest.rawCount, update.latest.trackCount,
                             update.preprocessMS, update.inferenceMS)
-                        // The split inference is actually made of, averaged over the
-                        // run so far rather than sampled from one frame. `other` is
-                        // the part of inference no stage claims -- the image
-                        // precision conversion ahead of the first stage mark.
+
                         let t = update.mean
                         self.stageLine = String(
                             format: "mean · backbone %.1f · gather %.1f · head %.1f "
@@ -385,9 +379,6 @@ final class ReplayModel: ObservableObject {
         var timestamp: Double
     }
 
-    /// Smooth replay positions after tracking has finished. This deliberately
-    /// does not run for live frames and does not change association, state,
-    /// velocity decisions, or the recorded sidecar.
     private func smoothedDisplayFrames(_ source: [ReplayDisplayFrame])
         -> [ReplayDisplayFrame] {
         guard replayEMAAlpha < 0.999 else { return source }

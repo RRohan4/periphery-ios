@@ -80,9 +80,6 @@ enum MLMultiArrayTransfer {
         array.strides.map(\.intValue) == denseStrides(for: array.shape.map(\.intValue))
     }
 
-    /// Iterate logical row-major order while advancing through physical memory
-    /// using Core ML's strides. This odometer avoids allocating an offsets
-    /// array for every model tensor on every frame.
     private static func forEachLogicalOffset(
         _ array: MLMultiArray,
         _ body: (_ logical: Int, _ physical: Int) -> Void

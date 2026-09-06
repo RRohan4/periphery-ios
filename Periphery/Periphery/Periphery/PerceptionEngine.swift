@@ -1,8 +1,5 @@
-//  PerceptionEngine.swift
-//  Source-neutral image -> calibration -> detector backend.
-//
-//  Live capture and recorded-drive replay both adapt their inputs into a
-//  PerceptionFrame. Nothing in this file knows which source produced it.
+// Source-neutral image -> calibration -> detector pipeline. Live capture and
+// replay both provide PerceptionFrame values.
 
 import CoreVideo
 import Foundation
@@ -28,11 +25,7 @@ struct PerceptionConfiguration {
 struct PerceptionTimings: Sendable {
     var preprocessMS: Double
     var inferenceMS: Double
-    /// The four stages that make up `inferenceMS`, in milliseconds.
-    ///
-    /// `Detector` has always measured these -- they were simply never carried out
-    /// of it, which left Replay able to see that a frame was slow but not which
-    /// stage was slow. Without this split, "inference is 70 ms" is not actionable.
+
     var backboneMS: Double = 0
     var gatherMS: Double = 0
     var headMS: Double = 0
@@ -40,9 +33,7 @@ struct PerceptionTimings: Sendable {
 
     /// What the four stages account for.
     var stagesMS: Double { backboneMS + gatherMS + headMS + decodeMS }
-    /// The rest of `inferenceMS`. This is not noise: the image precision
-    /// conversion in `Detector.detect` happens BEFORE the first stage mark, so it
-    /// lands here and nowhere else.
+
     var unaccountedMS: Double { inferenceMS - stagesMS }
 }
 

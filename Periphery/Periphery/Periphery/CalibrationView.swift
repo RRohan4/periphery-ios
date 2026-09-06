@@ -1,20 +1,9 @@
-//  CalibrationView.swift
-//  The four numbers the projection depends on, and how much to trust each.
-//
-//  Ordered by how much damage each does. Pitch first, because range error goes
-//  as r^2/h: at 1.20 m a point 40 m ahead sits 1.72 degrees below horizontal,
-//  so half a degree of pitch error reads 40 m as 56 m. Then height, which is a
-//  pure scale. Then yaw, 0.70 m of lateral error per degree at 40 m. Roll is
-//  last because gravity already measures it honestly and it needs no input.
+// Calibration controls and diagnostics for pose, camera geometry, and world
+// view framing.
 
 import Combine
 import SwiftUI
 
-/// Footer copy, hoisted out of the ViewBuilders.
-///
-/// A chain of `+`-concatenated string literals inside a ViewBuilder is a
-/// well-known way to blow the type checker's budget -- it did, on the
-/// diagnostics section. Multi-line literals in a plain enum cost it nothing.
 private enum Help {
     static let worldTilt = """
         How far above the road plane the world view is drawn from. It changes \
@@ -118,9 +107,7 @@ private enum Help {
 struct CalibrationView: View {
     @ObservedObject private var live = LiveSession.shared
     @StateObject private var model = CalibrationModel()
-    /// The world view's camera tilt. It is presentation, not calibration -- it
-    /// changes no measurement and is not part of the pose -- so it lives in
-    /// AppStorage next to the view that reads it rather than in the pipeline.
+
     @AppStorage(WorldFraming.key) private var worldTilt: Double = WorldFraming.defaultTilt
 
     private var snapshot: FramePipeline.Snapshot { live.snapshot }
@@ -223,10 +210,7 @@ struct CalibrationView: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
-                // The ablation, live. On comma2k19 de-rotation moved the answer
-                // by 0.00-0.12 deg and helped every time. A LARGE gap here means
-                // the gyro-to-camera axis mapping is wrong, not that the
-                // correction is working hard.
+
                 LabeledContent("without de-rotation") {
                     Text(String(format: "%+.2f°  (Δ%+.2f°)",
                                 snapshot.foe.pitchWithoutDerotationDegrees,
@@ -313,10 +297,6 @@ struct CalibrationView: View {
 
     // MARK: - World view
 
-    /// The one number in the world view that is taste rather than measurement.
-    /// Everything else about the framing is solved from it, so this is the
-    /// whole control: type a number or drag, and the camera re-solves how far
-    /// back and how far ahead it has to sit to still hold 0-42 m.
     private var worldSection: some View {
         Section {
             HStack {
@@ -328,9 +308,7 @@ struct CalibrationView: View {
                     .frame(width: 70)
                 Slider(value: $worldTilt, in: WorldFraming.tiltRange, step: 1)
             }
-            // Typing is unbounded, so the field is clamped on the way out
-            // rather than trusted. Guarded because writing the binding from
-            // its own onChange would otherwise loop.
+
             .onChange(of: worldTilt) { _, value in
                 let ok = WorldFraming.clamp(value)
                 if ok != value { worldTilt = ok }
@@ -562,9 +540,6 @@ final class CalibrationModel: ObservableObject {
 
     var trueNorth: Bool { pipeline.motion.headingIsTrueNorth }
 
-    /// Two independent estimates of the same bearing. They come from different
-    /// stacks, so agreement is evidence and disagreement is a bug -- see the
-    /// footer.
     var headingCrossCheck: String {
         guard let attitude = pipeline.motion.latestAttitude?.cameraHeading,
               let compass = pipeline.motion.latestTrueHeading else { return "—" }

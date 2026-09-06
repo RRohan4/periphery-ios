@@ -1,19 +1,5 @@
-//  MountPose.swift
-//  Where the camera sits and which way it points -- and, for each number,
-//  where that number came from.
-//
-//  These six values were previously six literals scattered across
-//  FramePipeline, Benchmark and SelfCheck. They are the numbers every range in
-//  the pipeline is scaled by, so they get one type, one place to persist, and a
-//  provenance tag each.
-//
-//  Provenance is not decoration. A gravity-derived pitch is `mount + road
-//  grade` and cannot separate the two -- measured at 2.45 deg p95 against a
-//  1.00 deg failure line -- so the UI has to be able to show it as the PRIOR it
-//  is rather than as an answer. The pipeline treats every pose identically;
-//  only the display cares.
-//
-//  Angles are radians throughout, degrees only at the UI edge.
+// Camera pose and the provenance of each pose component. Angles are radians;
+// the UI converts to degrees.
 
 import Foundation
 
@@ -43,15 +29,6 @@ struct MountPose: Codable, Equatable, Sendable {
             }
         }
 
-        /// Precedence. An automatic source may only overwrite a value whose
-        /// rank it meets or beats; an explicit action by a person always wins,
-        /// because it is a person choosing.
-        ///
-        /// The point of the ordering is that a typed-in pitch is an INITIAL
-        /// GUESS, not a lock. It has to outrank gravity, which measures
-        /// mount + road grade and would walk a good number back over a few
-        /// seconds. It must NOT outrank the drive-time estimator, which is the
-        /// thing the guess exists to seed.
         var rank: Int {
             switch self {
             case .fallback: return 0
@@ -91,9 +68,6 @@ struct MountPose: Codable, Equatable, Sendable {
     var yawFrom: Provenance
     var heightFrom: Provenance
 
-    /// One-sigma uncertainty on pitch, degrees, when whoever set it knew.
-    /// The budget from note 12: 0.25 design target, 0.50 tolerable, 1.00 a
-    /// declared failure that must be visible rather than silently absorbed.
     var pitchSigmaDegrees: Double?
 
     // MARK: - Degrees, for the UI only
@@ -113,9 +87,6 @@ struct MountPose: Codable, Equatable, Sendable {
 
     // MARK: - Defaults
 
-    /// The pose the app starts from. -3.659 deg and 1.20 m are the comma EON
-    /// rig the corpus was measured on; they are a plausible windshield mount and
-    /// nothing more, which is what `.fallback` says.
     static let fallback = MountPose(pitch: -3.659 * .pi / 180.0,
                                     roll: 0.0,
                                     yaw: 0.0,
@@ -129,9 +100,6 @@ struct MountPose: Codable, Equatable, Sendable {
 
     // MARK: - Sanity
 
-    /// Plausible windshield mounts only. Outside these the projection is not
-    /// wrong so much as meaningless, and it is better to say so than to draw
-    /// boxes on the sky.
     var isPlausible: Bool {
         abs(pitchDegrees) <= 25.0
             && abs(rollDegrees) <= 25.0
@@ -153,9 +121,6 @@ struct MountPose: Codable, Equatable, Sendable {
 
     private static let storageKey = "MountPose.v1"
 
-    /// Round-trips through UserDefaults. A mount survives an app restart; it
-    /// does not survive being moved, which is what the drive-time estimator is
-    /// for.
     static func load(from defaults: UserDefaults = .standard) -> MountPose {
         guard let data = defaults.data(forKey: storageKey),
               let pose = try? JSONDecoder().decode(MountPose.self, from: data),

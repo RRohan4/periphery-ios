@@ -1,15 +1,5 @@
-//  SelfCheck.swift
-//  Runs the golden vectors from tools/make_selfcheck.py against this port.
-//
-//  The CoreML halves are gated against ONNX at export time. This gates the
-//  half that was hand-written: anchors, voxel centres, the projection LUT, box
-//  decode, the direction fold, grid-to-vehicle, and circular NMS. It needs no
-//  camera and no model, so run it at launch and again after any change to
-//  Contract.swift, Calibration.swift or Decode.swift.
-//
-//  Regenerate the resources from the periphery repo:
-//    PYTHONPATH=. .venv/bin/python ../periphery-ios/tools/make_selfcheck.py \
-//        --out ../periphery-ios/Resources
+// Compares the hand-written geometry and decode port with generated golden
+// vectors. It does not require a camera or a loaded model.
 
 import Foundation
 import CoreML
@@ -290,18 +280,6 @@ struct SelfCheck {
         }
     }
 
-    /// Round-trip the focus-of-expansion inversion against the forward
-    /// projection it inverts.
-    ///
-    /// `Calibration.sourceVanishingPoint((1,0,0))` says where straight-ahead
-    /// lands for a known mount. The estimator measures that pixel and runs the
-    /// map backwards. Feeding the forward answer into the backward map must
-    /// return the mount it started from -- and must do so at nonzero ROLL,
-    /// which is the term that mixes the vertical and horizontal offsets into
-    /// each other and the one a sign error hides in.
-    ///
-    /// Without this, a flipped sign produces a confident, plausible, wrong
-    /// pitch: no crash, no NaN, just every range off by a fixed factor.
     private static func checkFocusOfExpansion() -> Result {
         // A representative windshield rig; the numbers only have to be
         // self-consistent, since this checks a round trip.
@@ -492,16 +470,6 @@ struct SelfCheck {
                             + format(worst))
     }
 
-    /// Roll and yaw have no golden -- the Python rig had neither axis, so
-    /// `sensor_T_vehicle` there is pitch-only and the committed goldens exercise
-    /// the new terms at exactly zero, where they vanish. That is a test that
-    /// passes for the wrong reason.
-    ///
-    /// So this asserts the two things a golden would have caught anyway: that
-    /// the rotation still collapses to the Python's Ry(pitch) at zero roll and
-    /// yaw, and that each axis moves the image the way the physical mount does.
-    /// A flipped sign applies twice the mount angle instead of cancelling it,
-    /// and the failure looks like a bad detector rather than a bad transform.
     private static func checkMountAxes(_ calibration: Calibration) -> Result {
         var failures = [String]()
 

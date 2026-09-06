@@ -1,12 +1,5 @@
-//  Contract.swift
-//  Geometry and label constants for safety40-locked-v1.
-//
-//  Every number here is derived from, and checked against, the Python that
-//  trained the checkpoint:
-//    periphery/training/contract.py   GridSpec, make_anchors, decode_boxes
-//    periphery/perception/fastbev.py  N_VOXELS, VOXEL_SIZE, ORIGIN, GRID_TO_VEHICLE
-//    configs/fastbev_cityscapes/D0_safety40_2h_512x256.json
-//  Where Swift and Python disagree, Python wins and this file is the bug.
+// Geometry, tensor shapes, labels, and grid constants for safety40-locked-v1.
+// Keep these values synchronized with the Python training and decode contract.
 
 import Foundation
 import simd
@@ -43,9 +36,6 @@ enum Contract {
     private static let cropY0 = 99
     static let heightIndices = [1, 2]      // metric z -0.66 m and 0.84 m
 
-    /// Voxel centres in grid metres, in the flatten order the volume expects:
-    /// gx outermost, then gy, then the two height slices.
-    /// Matches GridSpec.points_np() exactly, [6560, 3].
     static func voxelPoints() -> [SIMD3<Double>] {
         let base = fullOrigin - fullCount * voxelSize / 2.0
         var points = [SIMD3<Double>]()
@@ -65,13 +55,6 @@ enum Contract {
 
     // MARK: - Frames
 
-    /// vehicle = GRID_TO_VEHICLE @ [gx, gy, gz, 1].
-    /// forward = gy + 0.944, lateral = -gx (positive left), z = gz + 1.840.
-    ///
-    /// The 1.840 is the released virtual frame's z offset, not a claim about
-    /// this camera's height: cityscapes_target_rows() subtracted the same
-    /// constant when the labels were encoded, so decoding with it returns z in
-    /// the label frame. Change it and the boxes move, the model does not.
     static let gridToVehicle = simd_double4x4(rows: [
         SIMD4<Double>(0.0, 1.0, 0.0, 0.944),
         SIMD4<Double>(-1.0, 0.0, 0.0, 0.0),
@@ -112,9 +95,6 @@ enum Contract {
         var diagonal: Double { (w * w + l * l).squareRoot() }
     }
 
-    /// Cell-centre ordering of AlignedAnchor3DRangeGenerator, flattened the way
-    /// FastBEVHead flattens its output maps: gx outer, gy, size, rotation.
-    /// Index of a candidate is ((ix * fy + iy) * 4 + size) * 2 + rotation.
     static func anchors() -> [Anchor] {
         var rows = [Anchor]()
         rows.reserveCapacity(candidateCount)

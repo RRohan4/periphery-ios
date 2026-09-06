@@ -1,23 +1,5 @@
-//  Benchmark.swift
-//  What frame rate does this hold on a phone, and for how long before it throttles?
-//
-//  That is the question the port exists to answer. Everything here measures the
-//  full per-frame pipeline -- backbone, LUT gather, head, decode -- with a
-//  synthetic input, because the timing of a convolution does not depend on what
-//  the pixels are. Preprocessing is excluded deliberately: it is camera
-//  plumbing, and mixing it in would hide the model cost behind vImage.
-//
-//  Desktop reference to beat, batch 1:
-//      CUDA  5.1 backbone + 0.5 gather + 2.0 head =  7.6 ms
-//      CPU  33.7 backbone + 0.3 gather + 24.8 head = 58.8 ms
-//  58.8 ms is the conservative floor. Landing near it means something fell off
-//  the ANE and the Compute tab will say what.
-//
-//  Two things that make a naive number wrong:
-//    * the first inference includes model load and ANE compilation, so warm-up
-//      passes are discarded rather than averaged in;
-//    * a phone throttles. A 30-second burst says nothing about minute five,
-//      which is why the sustained run records thermal state over time.
+// Synthetic latency and sustained thermal measurements for the inference path.
+// Warm-up frames are excluded; preprocessing is measured separately.
 
 import CoreML
 import Foundation
@@ -94,9 +76,6 @@ enum Benchmark {
                            frameHeight: 874)
     }
 
-    /// A plausible input tensor. Content does not change convolution cost, but
-    /// zeros can hit denormal paths on some hardware, so this is filled with
-    /// normalised-looking noise.
     static func syntheticInput() throws -> MLMultiArray {
         let array = try MLMultiArray(shape: [1, 3,
                                              NSNumber(value: Contract.inputHeight),
@@ -110,10 +89,6 @@ enum Benchmark {
         return array
     }
 
-    /// Run `frames` inferences after `warmup` discarded ones.
-    ///
-    /// `progress` is called on every frame with (completed, total) so a long
-    /// sustained run does not look like a hang.
     static func run(frames: Int,
                     warmup: Int = 10,
                     targetFPS: Double? = nil,
@@ -122,10 +97,7 @@ enum Benchmark {
         let input = try syntheticInput()
 
         for _ in 0..<warmup {
-            // Core ML hands back autoreleased tensors. Without a pool drained
-            // every iteration they accumulate until the loop ends, and a long
-            // run is killed by jetsam long before it finishes -- which is
-            // exactly what an 18,000-frame run did.
+
             try autoreleasepool {
                 _ = try detector.detect(image: input)
             }
@@ -151,9 +123,7 @@ enum Benchmark {
                                          gather: timing.gather,
                                          head: timing.head,
                                          decode: timing.decode))
-            // Paced runs model the real duty cycle: a camera delivers a frame
-            // every 33 ms whatever the phone could manage flat out, and duty
-            // cycle is what thermal throttling actually responds to.
+
             if let interval {
                 let spent = seconds(since: frameStart)
                 if spent < interval { Thread.sleep(forTimeInterval: interval - spent) }
@@ -190,9 +160,6 @@ enum Benchmark {
 
     // MARK: - Helpers
 
-    /// The only thermal reporting iOS gives an unentitled app. No die
-    /// temperature, no clock frequencies, no watts -- a four-level enum and
-    /// nothing else.
     static func describe(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal: return "nominal"

@@ -1,38 +1,5 @@
-//  FlowView.swift
-//  The camera pitch estimator, made visible, on foot.
-//
-//  WHY A TAB
-//
-//  FocusOfExpansion works on comma2k19 -- 0.103 deg mean absolute error -- but
-//  that was measured offline, in Python, against a dataset. On the phone it is
-//  a different optical flow implementation, a different gyro, a different axis
-//  convention, and three sign choices that would each produce a confident wrong
-//  answer rather than a crash. Waiting for a drive to find that out is slow and
-//  the failure would be invisible: a wrong pitch just reads 40 m as 56 m.
-//
-//  Walking with the phone exercises the entire path in ten seconds, indoors,
-//  and makes every part of it visible:
-//
-//    * Walk forward. The cross should sit on the spot you are walking TOWARD.
-//    * Tilt the phone down, still walking the same way. The cross stays GLUED
-//      TO THAT SPOT in the world -- and because tilting the camera down slides
-//      the whole scene up the frame, the cross rides up with it. What must not
-//      happen is the cross drifting off the spot. Meanwhile the reported pitch
-//      goes NEGATIVE by however far you tilted, since pitch is nose-up
-//      positive. That one test proves the sign, the intrinsics and the roll
-//      unwind at once.
-//    * Turn while walking. If de-rotation works, the number barely moves. If
-//      the gyro axis mapping is wrong, it swings wildly. The handheld profile
-//      deliberately allows 8 deg/s so this is testable at all.
-//    * Point at a passing person or car. They light up red -- outliers -- with
-//      nothing in the app having recognised them as anything.
-//
-//  WHAT IT IS NOT
-//
-//  Not a calibration. The angle measured here is the angle of your HAND
-//  relative to the direction you are walking, and it is refused by MountPose
-//  on the way in (Gates.handheld.writesToPose is false). The mount pitch comes
-//  from the driving profile, in a car, or from the Calibrate tab.
+// Interactive diagnostic for the focus-of-expansion pitch estimator. It uses
+// the handheld profile and does not write a mount pose.
 
 import Combine
 import SwiftUI
@@ -60,9 +27,7 @@ struct FlowView: View {
         ZStack {
             Color.black
             if let session = live.session {
-                // `.fit`, unlike the Live tab: here the whole frame has to be
-                // visible, because an outlier patch cropped off the edge is the
-                // one you most wanted to see.
+
                 CameraPreview(session: session)
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
                     .overlay { FlowOverlay(debug: model.debug) }
@@ -125,9 +90,6 @@ struct FlowView: View {
         .background(Color(white: 0.07))
     }
 
-    /// Window median large, this-frame value small beside it. The gap between
-    /// them is how noisy a single pair is, which is the thing the window exists
-    /// to average away.
     private func angle(_ name: String, _ median: Double, _ instant: Double) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(name.uppercased())
@@ -259,9 +221,6 @@ final class FlowModel: ObservableObject {
     private var estimator: FocusOfExpansion { LiveSession.shared.pipeline.foe }
     private var attached = false
 
-    /// Taking over the shared estimator, rather than running a second one: two
-    /// optical-flow passes per frame would double the cost of the most
-    /// expensive thing on the phone, to show the same field twice.
     func attach() async {
         await LiveSession.shared.ensureStarted()
         guard !attached else { return }

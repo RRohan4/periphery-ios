@@ -1,14 +1,5 @@
-//  FramePipeline.swift
-//  Live camera/motion adapter for the source-neutral PerceptionEngine.
-//
-//  Confined to the capture queue after `start()`. Only value types cross to the
-//  main actor, once per frame, for drawing. Sensor history here only adapts Live
-//  samples into a neutral ego delta; detector and tracker state live in
-//  PerceptionEngine, which has no knowledge that this source is Live.
-//
-//  Split out of LiveView.swift, which had grown to hold the pipeline, the
-//  CoreMotion client, the renderer, the screen and the view model. This file is
-//  the pipeline and nothing else.
+// Live camera and motion adapter for the source-neutral PerceptionEngine. The
+// capture queue owns sensor history; only value-type snapshots reach the UI.
 
 import AVFoundation
 import Foundation
@@ -36,9 +27,7 @@ final class FramePipeline: @unchecked Sendable {
         var pose = MountPose.fallback
         /// Raw camera roll from gravity, degrees, before the plausibility gate.
         var measuredRollDegrees: Double = 0
-        /// Mount yaw from heading minus course, degrees, when both are
-        /// trustworthy. Computed and shown, not yet applied -- it wants the
-        /// estimator's windowing, not a per-sample difference.
+
         var measuredYawDegrees: Double?
         var speed: Double = -1
         var relativeAltitude: Double?
@@ -54,15 +43,11 @@ final class FramePipeline: @unchecked Sendable {
         /// False when the frame is too narrow to reach the trained focal, in
         /// which case every range carries a scale error that must be stated.
         var focalMatched = true
-        /// Lens position 0-1, whether focus is pinned, and whether the camera is
-        /// still hunting. A soft frame costs the flow estimator far more than it
-        /// costs the detector, so this is not a nicety.
+
         var lensPosition: Float = 0
         var focusLocked = false
         var focusHunting = false
-        /// Horizon and ground-distance lines in source pixels, for the overlay
-        /// on the camera preview. Computed here because this is where the
-        /// calibration lives.
+
         var guides = GroundGuides()
         /// The drive-time camera estimator. Grade-immune, unlike gravity, and
         /// self-announcing when it fails -- see FocusOfExpansion.
@@ -104,9 +89,7 @@ final class FramePipeline: @unchecked Sendable {
     private static let rollLimit = 25.0 * Double.pi / 180.0
 
     var onSnapshot: ((Snapshot) -> Void)?
-    /// The pose as of the last frame, for the recorder's manifest and the
-    /// Calibrate tab. Read off the capture queue; a torn Double here would only
-    /// mis-stamp a manifest, never the pipeline.
+
     var currentPose: MountPose { pose }
 
     /// Raw gravity pitch in radians, whether or not pitch is locked to it.
@@ -114,12 +97,6 @@ final class FramePipeline: @unchecked Sendable {
     var currentMeasuredYaw: Double? { measuredYaw }
 
     // MARK: - Pose edits
-    //
-    // Called from the Calibrate tab on the main actor, against a `pose` the
-    // capture queue also writes. The next frame rebuilds the LUT from a whole
-    // copy of the struct, so the worst case is one frame of mixed geometry --
-    // against which the alternative, a lock on the 100 Hz attitude path, is a
-    // poor trade.
 
     /// An explicit choice by a person; always accepted.
     func setPitch(degrees: Double, from provenance: MountPose.Provenance = .manual) {
@@ -128,9 +105,6 @@ final class FramePipeline: @unchecked Sendable {
         pose.save()
     }
 
-    /// An automatic update, subject to precedence. This is how the drive-time
-    /// estimator supersedes a typed-in guess without a manual entry being able
-    /// to freeze the pose forever.
     @discardableResult
     func offerPitch(_ radians: Double, from provenance: MountPose.Provenance) -> Bool {
         guard provenance.mayOverwrite(pose.pitchFrom) else { return false }
@@ -173,9 +147,6 @@ final class FramePipeline: @unchecked Sendable {
         pose.save()
     }
 
-    /// Apply the camera estimator's pitch now, as an explicit choice. Tagged
-    /// `.estimated` rather than `.manual` because it IS the estimator's number,
-    /// and tagging it manual would freeze out later, better windows.
     func applyEstimatedPitch() {
         let estimate = foe.estimate
         guard estimate.gates.writesToPose, estimate.reportable else { return }
@@ -195,9 +166,6 @@ final class FramePipeline: @unchecked Sendable {
         pose.save()
     }
 
-    /// Live operating point for the decoder. 0.50 is where precision and recall
-    /// were measured (P 0.647 / R 0.678); raising it trades recall for
-    /// precision and is the honest lever on a cluttered view.
     func setScoreThreshold(_ value: Double) { scoreThreshold = value }
     var currentScoreThreshold: Double { scoreThreshold }
 
@@ -275,28 +243,11 @@ final class FramePipeline: @unchecked Sendable {
             self.egoMotion.append(attitude: attitude)
             self.gravityPitch = attitude.gravityPitch
 
-            // Heavy smoothing: this is the seconds-to-minutes timescale, and
-            // per-frame rattle belongs to the gyro, not here. MotionSource runs
-            // at 100 Hz, so tau is about 0.5 s.
-            //
-            // Gravity may only write pitch where it outranks what is already
-            // there. It beats the built-in default and itself, and nothing
-            // else: a typed-in guess or an estimator output must not be walked
-            // back over the next few seconds by a source that cannot tell mount
-            // angle from road grade.
-            //
-            // A typed-in pitch is still only an INITIAL GUESS. It outranks
-            // gravity so it survives, and is outranked by the drive-time
-            // estimator, which is the thing it exists to seed.
             if MountPose.Provenance.gravity.mayOverwrite(self.pose.pitchFrom) {
                 self.pose.pitch = self.pose.pitch * 0.98 + attitude.gravityPitch * 0.02
                 self.pose.pitchFrom = .gravity
             }
 
-            // Roll IS honestly measurable from gravity -- its contaminant is
-            // road camber at ~0.6 deg and mean-zero, not the 2.45 deg of grade
-            // that makes the same trick fail for pitch. So it is applied, not
-            // merely displayed.
             self.smoothedRoll = self.smoothedRoll == nil
                 ? attitude.roll
                 : self.smoothedRoll! * 0.98 + attitude.roll * 0.02
@@ -306,19 +257,13 @@ final class FramePipeline: @unchecked Sendable {
                 self.pose.roll = roll
                 self.pose.rollFrom = .gravity
             } else {
-                // Not a windshield mount the projection can follow. The capture
-                // buffer is landscape however the phone is held, so a portrait
-                // mount does not rotate the image -- it lays the road sideways
-                // across a crop computed for the other axis. Say so; do not
-                // quietly reproject.
+
                 self.pose.roll = 0
                 self.pose.rollFrom = .fallback
             }
 
             self.recorder.append(attitude: attitude)
-            // The camera estimator needs rotation rate on its own timeline, at
-            // CoreMotion's rate rather than the frame rate: it averages over
-            // each frame pair's interval.
+
             self.foe.append(rotationRate: attitude.rotationRate, at: attitude.timestamp)
 
             if let heading = attitude.cameraHeading, let fix = self.motion.latestLocation,
@@ -343,16 +288,8 @@ final class FramePipeline: @unchecked Sendable {
 
     // MARK: Per frame
 
-    /// Take the camera estimate once it has converged.
-    ///
-    /// Precedence does the rest: `.estimated` outranks everything automatic, so
-    /// this supersedes gravity and a typed-in starting guess -- which is what a
-    /// starting guess is for -- and a person's later explicit action still wins.
     private func acceptFOE(_ estimate: FocusOfExpansion.Estimate) {
-        // `converged` is already false for any profile that may not write the
-        // pose, but state it here too: a handheld reading is the angle of a
-        // HAND, and silently installing it as the mount angle would be the
-        // worst kind of bug -- plausible, persistent, and saved to disk.
+
         guard estimate.gates.writesToPose else { return }
         guard autoApplyFOE, estimate.converged else { return }
         guard MountPose.Provenance.estimated.mayOverwrite(pose.pitchFrom) else { return }
@@ -362,14 +299,9 @@ final class FramePipeline: @unchecked Sendable {
     }
 
     private func handle(_ frame: CameraSession.Frame) {
-        // Recording is deliberately AHEAD of the busy guard. The recorded
-        // drive is the artefact; detection is a passenger on it. A detector
-        // that falls behind must not punch holes in the video.
+
         recorder.append(frame: frame)
 
-        // Also ahead of the busy guard, and for the same reason: the estimator
-        // wants an even sample of the drive, not whatever the detector happened
-        // to leave time for. It drops its own frames internally.
         if let calibration = engine?.currentCalibration {
             foe.feed(frame: frame, calibration: calibration,
                      speed: motion.latestLocation?.speed ?? -1)
@@ -453,9 +385,6 @@ final class FramePipeline: @unchecked Sendable {
         onSnapshot?(snapshot)
     }
 
-    /// If intrinsic delivery is unavailable, assume a 60-degree horizontal
-    /// field of view. Stated rather than silent: every range would then carry
-    /// an unmeasured scale error.
     private static func fallbackIntrinsics(width: Int, height: Int) -> simd_double3x3 {
         let focal = Double(width) / (2.0 * tan(60.0 * .pi / 180.0 / 2.0))
         return simd_double3x3(rows: [

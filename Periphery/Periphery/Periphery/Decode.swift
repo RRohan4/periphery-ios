@@ -1,14 +1,5 @@
-//  Decode.swift
-//  Head outputs -> vehicle-frame boxes.
-//
-//  Ports periphery/training/contract.py (decode_boxes),
-//  periphery/perception/portable_postprocess.py (_grid_yaw, _decode_vehicle,
-//  circular_nms_torch) and the reference decode in
-//  scripts/eval_fastbev_training.py:_training_predictions, which is the code
-//  path that produced the measured operating point (P 0.647 / R 0.678 /
-//  F1 0.662 at threshold 0.50, circular NMS radius 2.0 m).
-//
-//  The order of operations is not negotiable.
+// Decode detector head outputs into vehicle-frame boxes. The operation order
+// mirrors the Python training and post-processing paths.
 
 import Foundation
 import simd
@@ -34,13 +25,6 @@ struct Detection {
 
 enum Decode {
 
-    /// Full decode of one frame's head outputs.
-    ///
-    /// `classes` is [6720, 4] LOGITS, `boxes` is [6720, 9] regression codes,
-    /// `directions` is [6720, 2] logits. All contiguous, candidate-major.
-    /// `rejectImplausible` is OFF by default so the golden vectors in
-    /// SelfCheck exercise exactly the decode path that produced the measured
-    /// operating point. The live pipeline turns it on -- see `plausible`.
     static func detections(classes: UnsafePointer<Float>,
                            boxes: UnsafePointer<Float>,
                            directions: UnsafePointer<Float>,
@@ -92,18 +76,6 @@ enum Decode {
         return circularNMS(candidates, radius: nmsRadius)
     }
 
-    /// Is this box a vehicle, or an artefact wearing a vehicle's label?
-    ///
-    /// The box coder exponentiates its size codes, so a confident-looking
-    /// candidate can decode to a two-metre-tall motorcycle or a fourteen-metre
-    /// car. Nothing upstream rejects those: the score says how much the head
-    /// liked the FEATURE, not whether the geometry it emitted is possible.
-    ///
-    /// The bounds are deliberately loose -- wide enough that no real vehicle on
-    /// a road is excluded, tight enough that decode noise is. This removes
-    /// impossible geometry, NOT low-quality detections: the measured operating
-    /// point is P 0.647 at threshold 0.50, and the remaining false positives
-    /// are plausibly-shaped boxes on empty road that only the threshold moves.
     static func plausible(_ detection: Detection) -> Bool {
         let bounds: (length: ClosedRange<Double>, width: ClosedRange<Double>,
                      height: ClosedRange<Double>)
@@ -161,9 +133,6 @@ enum Decode {
         return folded + Contract.dirOffset + period * direction
     }
 
-    /// GRID_TO_VEHICLE applied to the box centre, plus the yaw convention flip.
-    /// Note the deliberate swap: the grid's l becomes the vehicle box's length
-    /// because grid y is vehicle forward.
     static func toVehicle(grid: GridBox, direction: Double,
                           score: Float, label: Int) -> Detection {
         let centerZ = grid.zBottom + grid.h / 2.0
@@ -180,9 +149,6 @@ enum Decode {
                          yaw: yaw)
     }
 
-    /// Greedy circular NMS on BEV centres, descending score, strict `< radius`
-    /// suppression. This is a distance rule, not an IoU rule: CoreML's built-in
-    /// NMS is a different suppression policy, not a faster version of this one.
     static func circularNMS(_ candidates: [Detection], radius: Double) -> [Detection] {
         guard !candidates.isEmpty else { return [] }
         let order = candidates.indices.sorted { lhs, rhs in
