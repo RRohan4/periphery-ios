@@ -111,10 +111,68 @@ struct VehicleProfile {
     var hasSeam: Bool { !glass.isEmpty && bodyZ != 0.40 && bodyZ != 0.35 }
 }
 
+// MARK: - Framing
+
+/// How the virtual camera is framed. Tilt is the one number left to taste, so
+/// it is the one number stored; everything else here is either a property of
+/// the sensor or a measurement of the data, and is not up for adjustment.
+///
+/// WHAT HAS TO STAY ON SCREEN. The sensor wedge, out past the end of the BEV
+/// grid -- not a rectangle. The old fit was the box [-11, 47] x [-15, 15] m,
+/// whose near corners sit 11 m BEHIND the car and 15 m to the side: outside
+/// the lens, off the end of the grid, a place no detection can appear.
+/// Counted over the 100 clips in the replay gallery, 29059 tracked boxes:
+/// none beyond 15 m laterally, none past 39 m (the grid ends at 39.45 m), and
+/// 24 of them -- 0.08% -- behind -2.6 m, all at bearings the forward lens
+/// cannot see. Framing ground that never holds anything pushed the camera far
+/// enough back to halve every real car.
+enum WorldFraming {
+    /// Degrees below horizontal. Lower grazes the road plane, which
+    /// foreshortens the far half into fewer rows of pixels and lets the camera
+    /// come in, so everything grows -- the far end included.
+    ///
+    /// The floor is geometry, not taste: the horizon sits tan(tilt)/tan(fov/2)
+    /// of half the panel above centre, so below 13.0 degrees it comes over the
+    /// top edge and the ground quad's far edge is on screen. 16 leaves 12% of
+    /// the panel height of headroom. The ceiling is only where the view stops
+    /// being worth the pixels it costs.
+    static let tiltRange: ClosedRange<Double> = 16...45
+    static let defaultTilt: Double = 20
+    static let key = "world.tiltDegrees"
+
+    static func clamp(_ degrees: Double) -> Double {
+        guard degrees.isFinite else { return defaultTilt }
+        return min(max(degrees, tiltRange.lowerBound), tiltRange.upperBound)
+    }
+
+    /// Past the 39.45 m where the BEV grid ends, so no framing throws away a
+    /// measurement that exists.
+    static let reach = 42.0
+    /// The ego's own rear end; the drawn body is 4.6 m long. It is the only
+    /// thing behind the car worth a pixel, and it binds the bottom edge.
+    static let back = 2.6
+    /// A tall vehicle's roof, and where its label hangs. The fit tests the
+    /// patch at this height as well as on the road, because what reaches the
+    /// TOP edge is a truck's roof at 42 m and the text over it, not the tarmac
+    /// underneath -- testing the ground alone let the solver dolly in until
+    /// roofs and labels were clipped off the top.
+    static let headroom = 2.6
+    /// Room above that roof for the label itself, in points.
+    static let labelPad = 22.0
+    /// Aiming at the middle of the patch is the obvious choice and a bad one:
+    /// a wedge on a ground plane does not sit centred on the panel when you
+    /// look at its centre, so it left a third of the height empty above the
+    /// far arc while the ego was jammed on the bottom edge blocking any
+    /// further dolly in. Aiming short lifts the scene and frees the bottom.
+    /// Bounded because the limit of that argument is a lens on the bumper.
+    static let aimRange: ClosedRange<Double> = 6...24
+}
+
 // MARK: - The virtual camera
 
-/// A fixed pose behind and above the car. Copied from drawBev(): 27 degrees of
-/// tilt, 132 m back, aimed 22 m ahead, 26 degree vertical field of view.
+/// A pose behind and above the car, 26 degree vertical field of view. Both the
+/// distance back and the aim point are SOLVED for the framing above rather
+/// than hardcoded, which is why one set of numbers frames every phone size.
 private struct WorldCamera {
     let width: Double
     let height: Double
@@ -124,42 +182,82 @@ private struct WorldCamera {
     let ux: Double, uz: Double
     let focal: Double
 
-    init(size: CGSize) {
+    init(size: CGSize, tiltDegrees: Double, sensorFocal: Double) {
         let viewWidth = Double(size.width)
         let viewHeight = Double(size.height)
-        let tilt = 27.0 * .pi / 180.0
-        let targetX = 18.0, targetZ = 0.9
+        let tilt = WorldFraming.clamp(tiltDegrees) * .pi / 180.0
+        // Hoisted: the solver below runs a few hundred times per draw and these
+        // do not vary inside it.
+        let ct = cos(tilt), st = sin(tilt)
+        let targetZ = 0.9
         let f = viewHeight / (2 * tan(26.0 * .pi / 360.0))
-        let margin = min(30.0, min(viewWidth, viewHeight) * 0.08)
-        func fits(_ distance: Double) -> Bool {
-            let cameraX = targetX - distance * cos(tilt)
-            let cameraZ = targetZ + distance * sin(tilt)
-            for x in [-11.0, 47.0] {
-                for y in [-15.0, 15.0] {
-                    let dx = x - cameraX, dz = -cameraZ
-                    let depth = dx * cos(tilt) - dz * sin(tilt)
-                    guard depth > 0.5 else { return false }
-                    let sx = viewWidth / 2 - y * f / depth
-                    let sy = viewHeight / 2
-                        - (dx * sin(tilt) + dz * cos(tilt)) * f / depth
-                    if sx < margin || sx > viewWidth - margin
-                        || sy < margin || sy > viewHeight - margin { return false }
-                }
+        let margin = min(10.0, min(viewWidth, viewHeight) * 0.04)
+        let top = margin + WorldFraming.labelPad
+
+        // The wedge the detector can actually see, on the road and again at
+        // roof height. See WorldFraming.
+        var patch = [SIMD3<Double>(-WorldFraming.back, -1.1, 0),
+                     SIMD3<Double>(-WorldFraming.back, 1.1, 0)]
+        let hfov = 2 * atan(Double(Contract.inputWidth) / (2 * max(sensorFocal, 1)))
+        for i in 0...8 {
+            let a = -hfov / 2 + hfov * Double(i) / 8
+            let x = WorldFraming.reach * cos(a), y = WorldFraming.reach * sin(a)
+            patch.append(SIMD3<Double>(x, y, 0))
+            patch.append(SIMD3<Double>(x, y, WorldFraming.headroom))
+        }
+
+        func fits(aim: Double, distance: Double) -> Bool {
+            let cameraX = aim - distance * ct
+            let cameraZ = targetZ + distance * st
+            for p in patch {
+                let dx = p.x - cameraX, dz = p.z - cameraZ
+                let depth = dx * ct - dz * st
+                guard depth > 0.5 else { return false }
+                let sx = viewWidth / 2 - p.y * f / depth
+                let sy = viewHeight / 2 - (dx * st + dz * ct) * f / depth
+                if sx < margin || sx > viewWidth - margin
+                    || sy < top || sy > viewHeight - margin { return false }
             }
             return true
         }
-        var low = 30.0, high = 520.0
-        for _ in 0..<36 {
-            let middle = (low + high) / 2
-            if fits(middle) { high = middle } else { low = middle }
+        // For a fixed aim the patch shrinks monotonically as the camera pulls
+        // back, so the closest distance that still holds it is one bisection.
+        func nearest(aim: Double) -> Double? {
+            guard fits(aim: aim, distance: 520) else { return nil }
+            if fits(aim: aim, distance: 12) { return 12 }
+            var low = 12.0, high = 520.0
+            for _ in 0..<26 {
+                if high - low <= 0.02 { break }
+                let middle = (low + high) / 2
+                if fits(aim: aim, distance: middle) { high = middle } else { low = middle }
+            }
+            return high
         }
-        let distance = high
+        // Aim has no such monotonicity, so it is scanned rather than bisected.
+        // Half a metre is far finer than the eye can tell.
+        var tried = [(aim: Double, distance: Double)]()
+        var best = Double.infinity
+        var aim = WorldFraming.aimRange.lowerBound
+        while aim <= WorldFraming.aimRange.upperBound + 1e-9 {
+            if let d = nearest(aim: aim) {
+                tried.append((aim, d))
+                best = min(best, d)
+            }
+            aim += 0.5
+        }
+        // Of everything within 1% of the closest, the LONGEST aim: the same
+        // zoom for the least perspective. The scan runs short to long.
+        var chosenAim = WorldFraming.reach / 2, distance = 120.0
+        if let pick = tried.last(where: { $0.distance <= best * 1.01 }) {
+            chosenAim = pick.aim
+            distance = pick.distance
+        }
         width = viewWidth
         height = viewHeight
-        camX = targetX - distance * cos(tilt)
-        camZ = targetZ + distance * sin(tilt)
-        fx = cos(tilt); fz = -sin(tilt)
-        ux = sin(tilt); uz = cos(tilt)
+        camX = chosenAim - distance * ct
+        camZ = targetZ + distance * st
+        fx = ct; fz = -st
+        ux = st; uz = ct
         focal = f
     }
 
@@ -198,9 +296,15 @@ struct WorldView: View {
     /// Ego ground speed, m/s. Negative when there is no fix.
     var egoSpeed: Double = -1
 
+    /// Set in Calibrate > World view. Read here rather than passed down so the
+    /// number reaches the only place that uses it without threading it through
+    /// every containing view.
+    @AppStorage(WorldFraming.key) private var tiltDegrees: Double = WorldFraming.defaultTilt
+
     var body: some View {
         Canvas { context, size in
-            let camera = WorldCamera(size: size)
+            let camera = WorldCamera(size: size, tiltDegrees: tiltDegrees,
+                                     sensorFocal: focal)
             drawGround(context: &context, camera: camera)
             drawRangeRings(context: &context, camera: camera)
             drawEgoArrow(context: &context, camera: camera)
@@ -247,12 +351,11 @@ struct WorldView: View {
             if let path = camera.path(ring) {
                 context.stroke(path, with: .color(Palette.line), lineWidth: 1)
             }
-            if let label = camera.project(r, -0.5, 0.06) {
-                context.draw(Text("\(Int(r)) m")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Palette.ink3),
-                             at: label.point, anchor: .leading)
-            }
+            // Unnumbered. The rings give distance a shape -- nearer, further,
+            // about twice as far -- and the eye reads that off the spacing
+            // without being told. The numbers were four more pieces of text
+            // competing with the labels that are actually about a car, and
+            // nobody needs a ring's range to the metre.
         }
         for y in [-1.85, 1.85] {
             if let path = camera.path([SIMD3<Double>(0, y, 0.06), SIMD3<Double>(40, y, 0.06)]) {
@@ -313,10 +416,13 @@ struct WorldView: View {
         for (object, _) in sorted.reversed() {
             let h = max(object.height, 1.0)
             if let label = camera.project(object.x, object.y, h + 0.5) {
+                // How far and how fast, set tight enough to read as one token.
+                // The track NUMBER is gone: it is an internal handle, it is
+                // never what you want to know about a car you are looking at,
+                // and at four glyphs plus a gap it was the widest thing here.
                 let speed = object.velocity.map { hypot($0.x, $0.y) * 3.6 }
-                let text = speed.map { String(format: "#%d   %.0f m   %.0f km/h",
-                                              object.id, object.x, $0) }
-                    ?? String(format: "#%d   %.0f m   —", object.id, object.x)
+                let text = speed.map { String(format: "%.0f m %.0f km/h", object.x, $0) }
+                    ?? String(format: "%.0f m", object.x)
                 context.draw(Text(text)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .foregroundStyle(PerceptionColour.state(object.state)),

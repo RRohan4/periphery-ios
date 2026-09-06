@@ -16,6 +16,24 @@ import SwiftUI
 /// well-known way to blow the type checker's budget -- it did, on the
 /// diagnostics section. Multi-line literals in a plain enum cost it nothing.
 private enum Help {
+    static let worldTilt = """
+        How far above the road plane the world view is drawn from. It changes \
+        nothing that is measured \u{2014} not the pose, not a range, not a box. It \
+        is the picture only.
+
+        Lower grazes the plane, which foreshortens the far half into fewer rows \
+        of pixels and lets the camera come in, so everything gets bigger \u{2014} the \
+        far end as well as the near one. On a phone panel, cars at 10 m: 25 px \
+        per metre at 18\u{00B0} against 17 at 27\u{00B0}, and at 40 m, 13 against 11. \
+        What it costs is depth separation: two cars 10 m apart in range are \
+        fewer pixels apart on screen, so bodies crowd and labels collide.
+
+        16\u{00B0} is the floor and it is geometry, not taste. The horizon sits \
+        tan(tilt)/tan(fov/2) of half the panel above centre, so below 13.0\u{00B0} it \
+        comes over the top edge. Every setting keeps the full 0\u{2013}42 m: the BEV \
+        grid itself ends at 39.45 m, so none of them is throwing away a \
+        measurement that exists.
+        """
     static let pitchDegrees = """
         The dominant error term. Range sensitivity is r²/h, so 0.25° is the design \
         budget, 0.50° is tolerable and 1.00° is a declared failure.
@@ -100,6 +118,10 @@ private enum Help {
 struct CalibrationView: View {
     @ObservedObject private var live = LiveSession.shared
     @StateObject private var model = CalibrationModel()
+    /// The world view's camera tilt. It is presentation, not calibration -- it
+    /// changes no measurement and is not part of the pose -- so it lives in
+    /// AppStorage next to the view that reads it rather than in the pipeline.
+    @AppStorage(WorldFraming.key) private var worldTilt: Double = WorldFraming.defaultTilt
 
     private var snapshot: FramePipeline.Snapshot { live.snapshot }
 
@@ -113,9 +135,13 @@ struct CalibrationView: View {
                 yawSection
                 rollSection
                 detectionSection
+                worldSection
                 diagnosticsSection
                 Section {
-                    Button("Reset to defaults", role: .destructive) { model.reset() }
+                    Button("Reset to defaults", role: .destructive) {
+                        model.reset()
+                        worldTilt = WorldFraming.defaultTilt
+                    }
                 }
             }
             .navigationTitle("Calibrate")
@@ -282,6 +308,43 @@ struct CalibrationView: View {
             Text("Detections")
         } footer: {
             Text(Help.detections).font(.caption2)
+        }
+    }
+
+    // MARK: - World view
+
+    /// The one number in the world view that is taste rather than measurement.
+    /// Everything else about the framing is solved from it, so this is the
+    /// whole control: type a number or drag, and the camera re-solves how far
+    /// back and how far ahead it has to sit to still hold 0-42 m.
+    private var worldSection: some View {
+        Section {
+            HStack {
+                TextField("tilt", value: $worldTilt,
+                          format: .number.precision(.fractionLength(0)))
+                    .font(.system(.body, design: .monospaced))
+                    .keyboardType(.numbersAndPunctuation)
+                    .submitLabel(.done)
+                    .frame(width: 70)
+                Slider(value: $worldTilt, in: WorldFraming.tiltRange, step: 1)
+            }
+            // Typing is unbounded, so the field is clamped on the way out
+            // rather than trusted. Guarded because writing the binding from
+            // its own onChange would otherwise loop.
+            .onChange(of: worldTilt) { _, value in
+                let ok = WorldFraming.clamp(value)
+                if ok != value { worldTilt = ok }
+            }
+            Text(worldTilt == WorldFraming.defaultTilt
+                 ? "the default"
+                 : String(format: "%+.0f\u{00B0} from the default",
+                          worldTilt - WorldFraming.defaultTilt))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("World view")
+        } footer: {
+            Text(Help.worldTilt).font(.caption2)
         }
     }
 
