@@ -41,10 +41,6 @@ struct MountPose: Codable, Equatable, Sendable {
         /// May a sample from `self` overwrite a value that currently came from
         /// `current`, with no person in the loop?
         func mayOverwrite(_ current: Provenance) -> Bool { rank >= current.rank }
-
-        /// True when the value is a starting point rather than a measurement of
-        /// the mount itself.
-        var isPrior: Bool { self == .fallback || self == .gravity }
     }
 
     // MARK: - The pose
@@ -106,15 +102,6 @@ struct MountPose: Codable, Equatable, Sendable {
             && abs(yawDegrees) <= 25.0
             && height > 0.3 && height < 3.0
             && forwardOfOrigin > -2.0 && forwardOfOrigin < 6.0
-    }
-
-    /// A short, honest one-liner for the stats strip.
-    var summary: String {
-        String(format: "pitch %+.2f (%@) · roll %+.2f (%@) · yaw %+.2f (%@) · h %.2f m (%@)",
-               pitchDegrees, pitchFrom.label,
-               rollDegrees, rollFrom.label,
-               yawDegrees, yawFrom.label,
-               height, heightFrom.label)
     }
 
     // MARK: - Persistence

@@ -225,13 +225,6 @@ struct CalibrationView: View {
                 .disabled(!canApplyFOE)
             Button("Use this yaw now") { model.applyEstimatedYaw() }
                 .disabled(!canApplyFOE)
-            if !snapshot.foe.gates.writesToPose {
-                Text("The Flow tab has the estimator in handheld mode. That "
-                     + "measures the angle of your hand, so it cannot be "
-                     + "applied to the mount.")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
             Button("Start the window again") { model.resetFOE() }
                 .font(.caption)
         } header: {
@@ -241,9 +234,7 @@ struct CalibrationView: View {
         }
     }
 
-    private var canApplyFOE: Bool {
-        snapshot.foe.reportable && snapshot.foe.gates.writesToPose
-    }
+    private var canApplyFOE: Bool { snapshot.foe.reportable }
 
     private var cameraState: String {
         let foe = snapshot.foe

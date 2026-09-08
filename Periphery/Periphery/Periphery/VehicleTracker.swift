@@ -158,7 +158,6 @@ final class VehicleTracker {
     private(set) var detectionSuppressed = 0
     private(set) var trackSuppressed = 0
     var suppressed: Int { detectionSuppressed + trackSuppressed }
-    var idsIssued: Int { nextID }
 
     init(configuration: VehicleTrackerConfiguration = VehicleTrackerConfiguration()) {
         self.configuration = configuration

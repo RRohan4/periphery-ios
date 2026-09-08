@@ -122,8 +122,6 @@ enum Contract {
     static let dirOffset = 0.7854
     /// Operating point. Locked with the checkpoint and the NMS radius.
     static let scoreThreshold = 0.50
-    /// Use 0.05 only to sweep the precision/recall curve.
-    static let decodeScoreFloor = 0.05
     static let nmsRadius = 2.0
 
     /// INTERNAL_CLASSES. The pedestrian head is frozen and untrained; the

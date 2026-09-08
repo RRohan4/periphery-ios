@@ -12,9 +12,6 @@ private enum Palette {
     static let panel2 = Color(red: 0.122, green: 0.149, blue: 0.180)   // #1f262e
     static let line = Color(red: 0.173, green: 0.208, blue: 0.243)     // #2c353e
     static let ink2 = Color(red: 0.580, green: 0.635, blue: 0.690)     // #94a2b0
-    static let ink3 = Color(red: 0.420, green: 0.471, blue: 0.522)     // #6b7885
-    static let vision = Color(red: 0.910, green: 0.639, blue: 0.239)   // #e8a33d
-    static let visionSoft = Color(red: 0.910, green: 0.639, blue: 0.239).opacity(0.16)
     static let radar = Color(red: 0.271, green: 0.702, blue: 0.769)    // #45b3c4
     static let radarSoft = Color(red: 0.271, green: 0.702, blue: 0.769).opacity(0.16)
     static let parkedSoft = Color(red: 0.580, green: 0.635, blue: 0.690).opacity(0.12)
@@ -247,7 +244,6 @@ struct WorldView: View {
     @AppStorage(WorldFraming.key) private var tiltDegrees: Double = WorldFraming.defaultTilt
     /// Presentation-only lateral camera correction. Zero preserves the live
     /// view's existing origin; replay supplies its temporary demo offset.
-    var cameraRight: Double = 0
 
     var body: some View {
         Canvas { context, size in
@@ -277,10 +273,10 @@ struct WorldView: View {
         }
         // What the network can actually see, from the LIVE focal.
         let hfov = 2 * atan(Double(Contract.inputWidth) / (2 * max(focal, 1)))
-        var wedge = [SIMD3<Double>(0, -cameraRight, 0.03)]
+        var wedge = [SIMD3<Double>(0, 0, 0.03)]
         for i in 0...24 {
             let a = -hfov / 2 + hfov * Double(i) / 24
-            wedge.append(SIMD3<Double>(40 * cos(a), -cameraRight + 40 * sin(a), 0.03))
+            wedge.append(SIMD3<Double>(40 * cos(a), 40 * sin(a), 0.03))
         }
         if var path = camera.path(wedge) {
             path.closeSubpath()

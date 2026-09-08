@@ -54,26 +54,10 @@ final class FocusOfExpansion: @unchecked Sendable {
                                    minSamplesToApply: 200,
                                    writesToPose: true,
                                    name: "driving")
-
-        static let handheld = Gates(minSpeed: -1.0,
-                                    maxYawRateDegrees: 8.0,
-                                    windowSize: 60,
-                                    minSamplesToReport: 8,
-                                    minSamplesToApply: .max,
-                                    writesToPose: false,
-                                    name: "handheld")
     }
 
-    /// Read on the capture queue and on `queue`; written from the main actor
-    /// when a tab switches profile. A torn read would cost one frame.
-    private var _gates = Gates.driving
-    var gates: Gates {
-        get { lock.withLock { _gates } }
-        set {
-            lock.withLock { _gates = newValue }
-            reset()
-        }
-    }
+    /// The only profile. Read on the capture queue and on `queue`.
+    let gates = Gates.driving
 
     // MARK: - What the UI reads
 
@@ -93,8 +77,7 @@ final class FocusOfExpansion: @unchecked Sendable {
         /// Median inlier count of the accepted fits. Low means the scene is
         /// thin; zero-consensus frames never get here at all.
         var inliers: Int = 0
-        /// The profile this estimate came from, carried along so a consumer
-        /// cannot apply a handheld reading to the mount by accident.
+        /// The profile this estimate came from.
         var gates = Gates.driving
         var windowSize: Int { gates.windowSize }
         /// True once the window is long enough to hand to the pose.
@@ -108,39 +91,6 @@ final class FocusOfExpansion: @unchecked Sendable {
         /// silently rejected (night) looks different from one that is gated.
         var acceptRate: Double = 0
     }
-
-    struct Debug: Sendable {
-        /// Working-image size the coordinates below are in.
-        var width = 0
-        var height = 0
-        /// The fit, in working-image pixels. Nil when there was no consensus --
-        /// which is itself the interesting case.
-        var foe: SIMD2<Double>?
-        /// Sampled flow, thinned for drawing. `vectors` is AFTER de-rotation,
-        /// so what is drawn is what the fit actually consumed.
-        var points: [SIMD2<Float>] = []
-        var vectors: [SIMD2<Float>] = []
-
-        var inlier: [Bool] = []
-
-        var medianFoe: SIMD2<Double>?
-        /// This pair alone, not the window median.
-        var pitchDegrees: Double = 0
-        var yawDegrees: Double = 0
-        var inliers = 0
-        var total = 0
-        /// Rotation subtracted from this pair, camera axes, deg/s.
-        var rotationDegreesPerSecond = SIMD3<Double>()
-        var note = ""
-    }
-
-    /// Set from the Flow tab. Costs a copy per pair, so it stays off otherwise.
-    var publishDebug = false
-
-    /// Called on the estimator's own queue after every processed pair.
-    var onEstimate: ((Estimate) -> Void)?
-    /// Called on the estimator's own queue when `publishDebug` is set.
-    var onDebug: ((Debug) -> Void)?
 
     private let lock = NSLock()
     private var _estimate = Estimate()
@@ -186,7 +136,6 @@ final class FocusOfExpansion: @unchecked Sendable {
     /// interval. 100 Hz for a couple of seconds.
     private var gyro = [(t: Double, w: SIMD3<Double>)]()
 
-    private var foeWindow = [SIMD2<Double>]()
     private var pitchWindow = [Double]()
     private var yawWindow = [Double]()
     private var rawWindow = [Double]()          // no de-rotation, diagnostic only
@@ -207,7 +156,6 @@ final class FocusOfExpansion: @unchecked Sendable {
     func reset() {
         queue.async {
             self.previous = nil
-            self.foeWindow.removeAll()
             self.pitchWindow.removeAll()
             self.yawWindow.removeAll()
             self.rawWindow.removeAll()
@@ -293,22 +241,14 @@ final class FocusOfExpansion: @unchecked Sendable {
 
         guard let flow = opticalFlow(from: first, to: current) else {
             publishGate("flow unavailable")
-            emitDebug { $0.note = "flow unavailable" }
             return
         }
-        let flowWidth = CVPixelBufferGetWidth(flow)
-        let flowHeight = CVPixelBufferGetHeight(flow)
         var points = [SIMD2<Double>]()
         var vectors = [SIMD2<Double>]()
         sample(flow: flow, points: &points, vectors: &vectors)
         guard points.count > 3 * Self.minInliers else {
             record(accepted: false)
             publishGate("only \(points.count) usable flow vectors")
-            emitDebug {
-                $0.width = flowWidth; $0.height = flowHeight
-                $0.total = points.count
-                $0.note = "too little flow — hold the phone still and walk forward"
-            }
             return
         }
 
@@ -318,13 +258,6 @@ final class FocusOfExpansion: @unchecked Sendable {
             // The night failure mode lands exactly here: plenty of flow, no
             // agreement about where it comes from.
             publishGate("no consensus (\(points.count) vectors)")
-            emitDebug {
-                $0.width = flowWidth; $0.height = flowHeight
-                $0.total = points.count
-                $0.rotationDegreesPerSecond = wCam * 180.0 / .pi
-                $0.note = "no consensus — nothing in view agrees on a direction"
-                self.thin(points: points, vectors: derotated, inlier: nil, into: &$0)
-            }
             return
         }
         // The same fit without the rotation correction, as a running check on
@@ -333,66 +266,9 @@ final class FocusOfExpansion: @unchecked Sendable {
 
         let angles = pitchAndYaw(foe: fit.foe, roll: roll)
         record(accepted: true)
-        append(foe: fit.foe, pitch: angles.pitch, yaw: angles.yaw,
+        append(pitch: angles.pitch, yaw: angles.yaw,
                raw: rawFit.map { pitchAndYaw(foe: $0.foe, roll: roll).pitch },
                inliers: fit.inliers)
-        let median = medianFoe()
-        emitDebug {
-            $0.width = flowWidth; $0.height = flowHeight
-            $0.foe = fit.foe
-            $0.medianFoe = median
-            $0.pitchDegrees = angles.pitch * 180.0 / .pi
-            $0.yawDegrees = angles.yaw * 180.0 / .pi
-            $0.inliers = fit.inliers
-            $0.total = points.count
-            $0.rotationDegreesPerSecond = wCam * 180.0 / .pi
-            self.thin(points: points, vectors: derotated,
-                      inlier: self.inlierMask(points: points, vectors: derotated,
-                                              foe: fit.foe),
-                      into: &$0)
-        }
-    }
-
-    // MARK: - Debug payload
-
-    private func emitDebug(_ fill: (inout Debug) -> Void) {
-        guard publishDebug, let onDebug else { return }
-        var debug = Debug()
-        fill(&debug)
-        onDebug(debug)
-    }
-
-    /// At most `limit` evenly spaced samples. Drawing two thousand arrows is
-    /// slower than computing them and reads as a smear.
-    private func thin(points: [SIMD2<Double>],
-                      vectors: [SIMD2<Double>],
-                      inlier: [Bool]?,
-                      into debug: inout Debug,
-                      limit: Int = 260) {
-        let step = max(1, points.count / limit)
-        for i in stride(from: 0, to: points.count, by: step) {
-            debug.points.append(SIMD2<Float>(Float(points[i].x), Float(points[i].y)))
-            debug.vectors.append(SIMD2<Float>(Float(vectors[i].x), Float(vectors[i].y)))
-            debug.inlier.append(inlier?[i] ?? false)
-        }
-    }
-
-    /// Which samples agreed with the winning focus, by the same residual the
-    /// fit used.
-    private func inlierMask(points: [SIMD2<Double>],
-                            vectors: [SIMD2<Double>],
-                            foe: SIMD2<Double>,
-                            threshold: Double = 2.0) -> [Bool] {
-        var mask = [Bool](repeating: false, count: points.count)
-        for i in points.indices {
-            let length = (vectors[i].x * vectors[i].x
-                          + vectors[i].y * vectors[i].y).squareRoot()
-            guard length > 1e-6 else { continue }
-            let nx = -vectors[i].y / length, ny = vectors[i].x / length
-            let offset = nx * points[i].x + ny * points[i].y
-            mask[i] = abs(nx * foe.x + ny * foe.y - offset) < threshold
-        }
-        return mask
     }
 
     // MARK: - Sampling the flow field
@@ -548,9 +424,8 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - The window
 
-    private func append(foe: SIMD2<Double>, pitch: Double, yaw: Double,
+    private func append(pitch: Double, yaw: Double,
                         raw: Double?, inliers: Int) {
-        foeWindow.append(foe)
         pitchWindow.append(pitch * 180.0 / .pi)
         yawWindow.append(yaw * 180.0 / .pi)
         rawWindow.append((raw ?? pitch) * 180.0 / .pi)
@@ -558,21 +433,12 @@ final class FocusOfExpansion: @unchecked Sendable {
         let windowSize = gates.windowSize
         if pitchWindow.count > windowSize {
             let excess = pitchWindow.count - windowSize
-            foeWindow.removeFirst(excess)
             pitchWindow.removeFirst(excess)
             yawWindow.removeFirst(excess)
             rawWindow.removeFirst(excess)
             inlierWindow.removeFirst(excess)
         }
         publish(gate: "")
-    }
-
-    /// Component-wise median, which is enough for a crosshair and cannot be
-    /// dragged off by one bad fit the way a mean can.
-    private func medianFoe() -> SIMD2<Double>? {
-        guard !foeWindow.isEmpty else { return nil }
-        return SIMD2<Double>(Self.median(foeWindow.map(\.x)),
-                             Self.median(foeWindow.map(\.y)))
     }
 
     private func record(accepted: Bool) {
@@ -602,7 +468,6 @@ final class FocusOfExpansion: @unchecked Sendable {
             estimate.inliers = Int(Self.median(inlierWindow.map { Double($0) }))
         }
         lock.withLock { _estimate = estimate }
-        onEstimate?(estimate)
     }
 
     private static func median(_ values: [Double]) -> Double {

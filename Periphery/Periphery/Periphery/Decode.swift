@@ -20,7 +20,6 @@ struct Detection {
     var yaw: Double
 
     var range: Double { (x * x + y * y).squareRoot() }
-    var className: String { Contract.classNames[label] }
 }
 
 enum Decode {
