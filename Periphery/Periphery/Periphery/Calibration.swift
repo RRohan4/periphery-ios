@@ -1,5 +1,5 @@
 // Mount pose, focal matching, and grid-to-feature projection. The transforms
-// mirror the corresponding Python geometry and are covered by SelfCheck.
+// mirror the corresponding Python geometry.
 
 import Foundation
 import simd
