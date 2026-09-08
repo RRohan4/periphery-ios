@@ -1,5 +1,5 @@
-// Source-neutral image -> calibration -> detector pipeline. Live capture and
-// replay both provide PerceptionFrame values.
+// Image -> calibration -> detector pipeline, fed one PerceptionFrame at a
+// time by FramePipeline.
 
 import CoreVideo
 import Foundation
@@ -22,44 +22,18 @@ struct PerceptionConfiguration {
     var rejectImplausible = true
 }
 
-struct PerceptionTimings: Sendable {
-    var preprocessMS: Double
-    var inferenceMS: Double
-
-    var backboneMS: Double = 0
-    var gatherMS: Double = 0
-    var headMS: Double = 0
-    var decodeMS: Double = 0
-
-    /// What the four stages account for.
-    var stagesMS: Double { backboneMS + gatherMS + headMS + decodeMS }
-
-    var unaccountedMS: Double { inferenceMS - stagesMS }
-}
-
 struct PerceptionCalibrationSnapshot {
     var calibration: Calibration
     var crop: ImageCrop
     var focal: Double
     var focalMatched: Bool
     var visibleVoxelFraction: Double
-    var guides: GroundGuides
-}
-
-struct PerceptionDiagnostics {
-    /// Actual Core ML boundary precisions selected on this device.
-    var tensorPrecision: String
-    var temporalReset: Bool
 }
 
 struct PerceptionResult {
-    var timestamp: TimeInterval
     var rawDetections: [Detection]
     var trackedObjects: [TrackedVehicle]
-    var egoMotion: EgoDelta
     var calibration: PerceptionCalibrationSnapshot
-    var timings: PerceptionTimings
-    var diagnostics: PerceptionDiagnostics
 }
 
 final class PerceptionEngine {
@@ -82,18 +56,11 @@ final class PerceptionEngine {
             throw DetectorError.modelMissing("detector was not initialized")
         }
 
-        var mark = DispatchTime.now()
         let input = try preprocessor.fill(from: frame.pixelBuffer, crop: crop)
-        let preprocessMS = Self.ms(since: mark)
-
-        mark = DispatchTime.now()
         let detections = try detector.detect(
             image: input,
             scoreThreshold: configuration.scoreThreshold,
             rejectImplausible: configuration.rejectImplausible)
-        let inferenceMS = Self.ms(since: mark)
-        // Read immediately: `lastTiming` describes the call that just returned.
-        let stages = detector.lastTiming
 
         let frameInterval = lastTimestamp.map { frame.timestamp - $0 }
         let discontinuous = !frame.timestamp.isFinite
@@ -106,27 +73,14 @@ final class PerceptionEngine {
         lastTimestamp = frame.timestamp
 
         return PerceptionResult(
-            timestamp: frame.timestamp,
             rawDetections: detections,
             trackedObjects: tracked,
-            egoMotion: ego,
             calibration: PerceptionCalibrationSnapshot(
                 calibration: calibration,
                 crop: crop,
                 focal: calibration.achievedFocal(crop),
                 focalMatched: calibration.focalIsMatched(crop),
-                visibleVoxelFraction: detector.visibleVoxelFraction,
-                guides: calibration.groundGuides()),
-            timings: PerceptionTimings(
-                preprocessMS: preprocessMS,
-                inferenceMS: inferenceMS,
-                backboneMS: stages.backbone * 1000,
-                gatherMS: stages.gather * 1000,
-                headMS: stages.head * 1000,
-                decodeMS: stages.decode * 1000),
-            diagnostics: PerceptionDiagnostics(
-                tensorPrecision: detector.precisionNote,
-                temporalReset: discontinuous))
+                visibleVoxelFraction: detector.visibleVoxelFraction))
     }
 
     func resetTemporalState() {
@@ -162,9 +116,5 @@ final class PerceptionEngine {
         }
         currentCalibration = updated
         return updated
-    }
-
-    private static func ms(since mark: DispatchTime) -> Double {
-        Double(DispatchTime.now().uptimeNanoseconds - mark.uptimeNanoseconds) / 1e6
     }
 }

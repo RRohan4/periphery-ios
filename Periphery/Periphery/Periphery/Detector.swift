@@ -17,15 +17,6 @@ enum DetectorError: Error, CustomStringConvertible {
     }
 }
 
-/// Per-frame timings, for the measurement this port exists to produce.
-struct InferenceTiming {
-    var backbone: Double = 0
-    var gather: Double = 0
-    var head: Double = 0
-    var decode: Double = 0
-    var total: Double { backbone + gather + head + decode }
-}
-
 final class Detector {
 
     private let backbone: MLModel
@@ -46,10 +37,6 @@ final class Detector {
     private var boxScratch: [Float]
     private var directionScratch: [Float]
     private var lut: ProjectionLUT
-
-    private(set) var lastTiming = InferenceTiming()
-    /// What Core ML actually handed back, for the record.
-    private(set) var precisionNote = ""
 
     init(calibration: Calibration,
          configuration: MLModelConfiguration = Detector.defaultConfiguration()) throws {
@@ -72,7 +59,6 @@ final class Detector {
                                        NSNumber(value: Contract.inputHeight),
                                        NSNumber(value: Contract.inputWidth)],
                                dataType: imageType)
-        precisionNote = "image \(Detector.name(imageType)), volume \(Detector.name(volumeType))"
 
         imageScratch = [Float](repeating: 0,
                                count: imageBuffer == nil ? 0
@@ -113,8 +99,6 @@ final class Detector {
     func detect(image: MLMultiArray,
                 scoreThreshold: Double = Contract.scoreThreshold,
                 rejectImplausible: Bool = false) throws -> [Detection] {
-        var timing = InferenceTiming()
-
         // The image arrives float32 from Preprocessor; convert only if the
         // model asked for something else.
         let modelImage: MLMultiArray
@@ -126,32 +110,20 @@ final class Detector {
             modelImage = image
         }
 
-        var mark = DispatchTime.now()
         let outputs = try run(backbone, input: modelImage, name: backboneInputName)
         guard let features = outputs.featureValue(for: backboneOutputName)?.multiArrayValue else {
             throw DetectorError.unexpectedShape("backbone produced no array")
         }
-        timing.backbone = Detector.seconds(since: mark)
 
-        mark = DispatchTime.now()
         try Detector.readFloats(features, into: &featureScratch, "features")
         try gather()
-        timing.gather = Detector.seconds(since: mark)
 
-        mark = DispatchTime.now()
         let headOutputs = try run(head, input: volume, name: headInputName)
         let (classes, boxes, directions) = try Detector.headTensors(headOutputs)
         try Detector.readFloats(classes, into: &classScratch, "classes")
         try Detector.readFloats(boxes, into: &boxScratch, "boxes")
         try Detector.readFloats(directions, into: &directionScratch, "directions")
-        Detector.dumpTensors([Detector.describe(features, "backbone.features"),
-                              Detector.describe(volume, "head.input.volume"),
-                              Detector.describe(classes, "head.classes"),
-                              Detector.describe(boxes, "head.boxes"),
-                              Detector.describe(directions, "head.directions")])
-        timing.head = Detector.seconds(since: mark)
 
-        mark = DispatchTime.now()
         var detections = [Detection]()
         classScratch.withUnsafeBufferPointer { classPointer in
             boxScratch.withUnsafeBufferPointer { boxPointer in
@@ -165,9 +137,6 @@ final class Detector {
                 }
             }
         }
-        timing.decode = Detector.seconds(since: mark)
-
-        lastTiming = timing
         return detections
     }
 
@@ -189,6 +158,16 @@ final class Detector {
 
     /// Copy an MLMultiArray into a float32 buffer, converting from float16 when
     /// that is what the Neural Engine returned.
+    private static func readFloats(_ array: MLMultiArray,
+                                   into destination: inout [Float],
+                                   _ what: String) throws {
+        guard array.count == destination.count else {
+            throw DetectorError.unexpectedShape(
+                "\(what) has \(array.count) elements, expected \(destination.count)")
+        }
+        try MLMultiArrayTransfer.readFloats(array, into: &destination, named: what)
+    }
+
     private static func readFloats(_ array: MLMultiArray,
                                    into destination: inout [Float],
                                    _ what: String) throws {
@@ -325,16 +304,6 @@ final class Detector {
             .multiArrayConstraint?.dataType ?? .float32
     }
 
-    private static func name(_ type: MLMultiArrayDataType) -> String {
-        switch type {
-        case .float16: return "float16"
-        case .float32: return "float32"
-        case .double: return "float64"
-        case .int32: return "int32"
-        default: return "raw \(type.rawValue)"
-        }
-    }
-
     /// Sort the head's three outputs by trailing dimension.
     private static func headTensors(_ outputs: MLFeatureProvider) throws
         -> (classes: MLMultiArray, boxes: MLMultiArray, directions: MLMultiArray) {
@@ -353,7 +322,4 @@ final class Detector {
         return (classes, boxes, directions)
     }
 
-    private static func seconds(since mark: DispatchTime) -> Double {
-        Double(DispatchTime.now().uptimeNanoseconds - mark.uptimeNanoseconds) / 1e9
-    }
 }
