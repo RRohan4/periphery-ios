@@ -4,7 +4,7 @@ import CoreMotion
 import Foundation
 import simd
 
-/// Everything the pipeline, the recorder and the estimator read.
+/// Everything the pipeline and the estimator read.
 final class MotionSource: NSObject, @unchecked Sendable {
 
     // MARK: - Samples
@@ -15,10 +15,7 @@ final class MotionSource: NSObject, @unchecked Sendable {
         /// Seconds since boot (mach_absolute_time domain).
         var timestamp: TimeInterval
         var gravity: SIMD3<Double>
-        var userAcceleration: SIMD3<Double>
         var rotationRate: SIMD3<Double>
-        /// Attitude as a quaternion in the active reference frame.
-        var quaternion: simd_quatd
         /// Camera elevation above horizontal, radians, positive nose-up.
         /// This is `mount + road grade` and cannot separate the two.
         var gravityPitch: Double
@@ -33,33 +30,15 @@ final class MotionSource: NSObject, @unchecked Sendable {
     struct Location: Sendable {
         /// Republished into the boot domain via the recorded anchor.
         var timestamp: TimeInterval
-        /// The original NSDate value, seconds since 1970, kept verbatim.
-        var wallTimestamp: TimeInterval
-        var latitude: Double
-        var longitude: Double
-        var altitude: Double
-        var horizontalAccuracy: Double
-        var verticalAccuracy: Double
-
         var speed: Double
-        var speedAccuracy: Double
         var course: Double
         var courseAccuracy: Double
-    }
-
-    struct Heading: Sendable {
-        var timestamp: TimeInterval
-        var wallTimestamp: TimeInterval
-        var trueHeading: Double
-        var magneticHeading: Double
-        var accuracy: Double
     }
 
     /// CMAltimeter, ~1 Hz. Relative only -- the absolute value is useless.
     struct Altitude: Sendable {
         var timestamp: TimeInterval
         var relativeAltitude: Double
-        var pressureKPa: Double
     }
 
     struct ClockAnchor: Sendable {
@@ -79,8 +58,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
     var onLocation: ((Location) -> Void)?
     /// Called on the motion queue.
     var onAltitude: ((Altitude) -> Void)?
-    /// Called on the main queue, where CLLocationManager delivers.
-    var onHeading: ((Heading) -> Void)?
 
     // MARK: - Latched state, for readers that only want "now"
 
@@ -96,7 +73,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
     var latestAltitude: Altitude? { lock.withLock { _latestAltitude } }
 
     var latestTrueHeading: Double? { lock.withLock { _latestTrueHeading } }
-    var clockAnchor: ClockAnchor { lock.withLock { _anchor } }
 
     // MARK: - Machinery
 
@@ -112,7 +88,6 @@ final class MotionSource: NSObject, @unchecked Sendable {
     }()
 
     private(set) var referenceFrame: CMAttitudeReferenceFrame = .xArbitraryZVertical
-    private(set) var altimeterAvailable = false
     private(set) var running = false
 
     var headingIsTrueNorth: Bool { referenceFrame == .xTrueNorthZVertical }
@@ -171,12 +146,10 @@ final class MotionSource: NSObject, @unchecked Sendable {
 
     private func startAltimeter() {
         guard CMAltimeter.isRelativeAltitudeAvailable() else { return }
-        altimeterAvailable = true
         altimeter.startRelativeAltitudeUpdates(to: queue) { [weak self] data, _ in
             guard let self, let data else { return }
             let sample = Altitude(timestamp: data.timestamp,
-                                  relativeAltitude: data.relativeAltitude.doubleValue,
-                                  pressureKPa: data.pressure.doubleValue)
+                                  relativeAltitude: data.relativeAltitude.doubleValue)
             self.lock.withLock { self._latestAltitude = sample }
             self.onAltitude?(sample)
         }
@@ -196,15 +169,10 @@ final class MotionSource: NSObject, @unchecked Sendable {
 
     private func attitude(from m: CMDeviceMotion) -> Attitude {
         let g = SIMD3<Double>(m.gravity.x, m.gravity.y, m.gravity.z)
-        let q = m.attitude.quaternion
         return Attitude(
             timestamp: m.timestamp,
             gravity: g,
-            userAcceleration: SIMD3<Double>(m.userAcceleration.x,
-                                            m.userAcceleration.y,
-                                            m.userAcceleration.z),
             rotationRate: SIMD3<Double>(m.rotationRate.x, m.rotationRate.y, m.rotationRate.z),
-            quaternion: simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w),
             gravityPitch: Self.gravityPitch(g),
             roll: Self.cameraRoll(g),
             cameraHeading: headingIsTrueNorth ? Self.cameraHeading(m.attitude) : nil)
@@ -253,14 +221,7 @@ extension MotionSource: CLLocationManagerDelegate {
                 // Boot domain, so this sits on the same timeline as the video
                 // and the IMU without a second conversion at every consumer.
                 timestamp: anchor.bootSeconds + (wall - anchor.wallSeconds),
-                wallTimestamp: wall,
-                latitude: location.coordinate.latitude,
-                longitude: location.coordinate.longitude,
-                altitude: location.altitude,
-                horizontalAccuracy: location.horizontalAccuracy,
-                verticalAccuracy: location.verticalAccuracy,
                 speed: location.speed,
-                speedAccuracy: location.speedAccuracy,
                 course: location.course,
                 courseAccuracy: location.courseAccuracy)
             lock.withLock { _latestLocation = sample }
@@ -271,14 +232,6 @@ extension MotionSource: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
         guard newHeading.headingAccuracy >= 0 else { return }
         lock.withLock { _latestTrueHeading = newHeading.trueHeading }
-        let anchor = Self.sampleAnchor()
-        lock.withLock { _anchor = anchor }
-        let wall = newHeading.timestamp.timeIntervalSince1970
-        onHeading?(Heading(timestamp: anchor.bootSeconds + (wall - anchor.wallSeconds),
-                           wallTimestamp: wall,
-                           trueHeading: newHeading.trueHeading,
-                           magneticHeading: newHeading.magneticHeading,
-                           accuracy: newHeading.headingAccuracy))
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

@@ -13,18 +13,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let intrinsics: simd_double3x3?
         let width: Int
         let height: Int
-        /// The buffer itself, kept so the recorder can hand it to an
-        /// AVAssetWriter without a second capture path.
-        let sampleBuffer: CMSampleBuffer
-
         let presentationTime: CMTime
-
-        let exposureSeconds: Double
-        /// Sensor gain. High ISO means a noisy image, which is the other way
-        /// flow quality dies.
-        let iso: Double
-
-        let lensPosition: Double
     }
 
     enum CameraError: Error, CustomStringConvertible {
@@ -49,14 +38,11 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "com.periphery.camera", qos: .userInitiated)
-    /// Held for two reasons: to apply a focus policy, and to stamp each Frame
-    /// with the exposure, gain and lens position it was actually shot at.
+    /// Held so the focus policy can be applied and read back.
     private var device: AVCaptureDevice?
 
     /// Called on the capture queue, not the main thread.
     var onFrame: ((Frame) -> Void)?
-    private(set) var stabilizationDisabled = false
-    private(set) var intrinsicsAvailable = false
 
     static func requestAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -93,11 +79,9 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         if let connection = output.connection(with: .video) {
             if connection.isVideoStabilizationSupported {
                 connection.preferredVideoStabilizationMode = .off
-                stabilizationDisabled = true
             }
             if connection.isCameraIntrinsicMatrixDeliverySupported {
                 connection.isCameraIntrinsicMatrixDeliveryEnabled = true
-                intrinsicsAvailable = true
             }
         }
 
@@ -118,8 +102,6 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     /// True while the camera is still hunting; a frame captured now may be soft.
     var isAdjustingFocus: Bool { device?.isAdjustingFocus ?? false }
 
-    private(set) var focusPolicy: FocusPolicy = .autoFar
-
     func apply(_ policy: FocusPolicy) {
         guard let device, (try? device.lockForConfiguration()) != nil else { return }
         defer { device.unlockForConfiguration() }
@@ -136,7 +118,6 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             guard device.isFocusModeSupported(.locked) else { return }
             device.setFocusModeLocked(lensPosition: min(max(position, 0), 1))
         }
-        focusPolicy = policy
         policy.save()
     }
 
@@ -147,8 +128,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         guard device.isFocusModeSupported(.locked) else { return device.lensPosition }
         device.setFocusModeLocked(lensPosition: AVCaptureDevice.currentLensPosition)
         let position = device.lensPosition
-        focusPolicy = .locked(position)
-        focusPolicy.save()
+        FocusPolicy.locked(position).save()
         return position
     }
 
@@ -171,16 +151,11 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let exposure = device.map { CMTimeGetSeconds($0.exposureDuration) } ?? 0
         onFrame?(Frame(pixelBuffer: pixelBuffer,
                        intrinsics: Self.intrinsics(from: sampleBuffer),
                        width: CVPixelBufferGetWidth(pixelBuffer),
                        height: CVPixelBufferGetHeight(pixelBuffer),
-                       sampleBuffer: sampleBuffer,
-                       presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-                       exposureSeconds: exposure.isFinite ? exposure : 0,
-                       iso: Double(device?.iso ?? 0),
-                       lensPosition: Double(device?.lensPosition ?? 0)))
+                       presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
     }
 
     /// The per-frame intrinsic matrix AVFoundation attaches when delivery is
