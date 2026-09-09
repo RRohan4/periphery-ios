@@ -94,11 +94,14 @@ final class Detector {
 
     var visibleVoxelFraction: Double { lut.visibleFraction }
 
-    /// One frame. `image` is [1, 3, 256, 512] float32, normalised per the
-    /// contract: (pixel - MEAN) / STD on 0-255 values, RGB.
+
+    /// image in
+    ///   → backbone (Core ML)        2D features
+    ///   → gather()                  ProjectionLUT lift
+    ///   → head (Core ML)            classes / boxes / directions
+    ///   → Decode.detections()       final boxes
     func detect(image: MLMultiArray,
-                scoreThreshold: Double = Contract.scoreThreshold,
-                rejectImplausible: Bool = false) throws -> [Detection] {
+                scoreThreshold: Double = Contract.scoreThreshold) throws -> [Detection] {
         // The image arrives float32 from Preprocessor; convert only if the
         // model asked for something else.
         let modelImage: MLMultiArray
@@ -132,8 +135,7 @@ final class Detector {
                                                    boxes: boxPointer.baseAddress!,
                                                    directions: directionPointer.baseAddress!,
                                                    anchors: anchors,
-                                                   scoreThreshold: scoreThreshold,
-                                                   rejectImplausible: rejectImplausible)
+                                                   scoreThreshold: scoreThreshold)
                 }
             }
         }

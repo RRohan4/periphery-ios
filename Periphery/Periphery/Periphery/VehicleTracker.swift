@@ -130,6 +130,8 @@ final class VehicleTracker {
         var y = 0.0
         var yaw = 0.0
 
+        // Integrate one ego-motion step into the accumulated world pose.
+        //use gyro 
         mutating func advance(_ ego: EgoDelta) {
             let c = cos(yaw), s = sin(yaw)
             x += c * ego.dx - s * ego.dy
@@ -137,11 +139,13 @@ final class VehicleTracker {
             yaw += ego.dyaw
         }
 
+        // Convert an ego-frame point to world coordinates.
         func toWorld(x ex: Double, y ey: Double) -> SIMD2<Double> {
             let c = cos(yaw), s = sin(yaw)
             return SIMD2(x + c * ex - s * ey, y + s * ex + c * ey)
         }
 
+        // Convert a world point to the current ego frame.
         func toEgo(x wx: Double, y wy: Double) -> SIMD2<Double> {
             let c = cos(-yaw), s = sin(-yaw)
             let tx = wx - x, ty = wy - y
@@ -163,6 +167,7 @@ final class VehicleTracker {
         self.configuration = configuration
     }
 
+    // Clear all tracks, pose, IDs, and per-frame counters.
     func reset() {
         tracks.removeAll(keepingCapacity: true)
         pose = Pose2D()
@@ -171,24 +176,44 @@ final class VehicleTracker {
         detectionSuppressed = 0; trackSuppressed = 0
     }
 
+/*
+    1. remove overlaps
+    2. predict, meaning we propogate cars forward accounting for our own motion
+    3. update our own motion
+    4. associate detections with tracks
+    5. correct matched tracks using non holonomic motion model
+    6. if we dont see something we assume it travels at its old velocity forward 
+    and we hold for some t i think equal to 0.5
+    7. birth new tracks for cars we havent seen before
+    8. record world positions that we use for determining velocity
+    9. delete tracks that timed out 
+    10. remove overlapping tracks
+    11. classify parked vs moving 
+    12. build outputs for ui
+*/
     func step(detections input: [Detection], ego: EgoDelta,
               timestamp t: TimeInterval) -> [TrackedVehicle] {
         var detections = input
+        // Drop overlapping detections before association (closer / higher-score wins).
         if configuration.suppressOverlap {
             let filtered = filterOverlapping(detections)
             detections = filtered.detections
             detectionSuppressed += filtered.removed
         }
 
+        // Move every track to where we expect it in this frame's ego coordinates.
         predict(ego)
+        // Advance accumulated ego pose in world (for world↔ego conversions).
         pose.advance(ego)
 
+        // Pair predicted tracks with this frame's detections (Hungarian assignment).
         let pairs = match(detections, dt: max(ego.dt, 1e-3),
                           egoStep: hypot(ego.dx, ego.dy))
         let matchedTracks = Set(pairs.map { $0.0 })
         let matchedDetections = Set(pairs.map { $0.1 })
         matches += pairs.count
 
+        // Overwrite matched tracks with fresh detector measurements.
         for (trackIndex, detectionIndex) in pairs {
             let track = tracks[trackIndex]
             let detection = detections[detectionIndex]
@@ -202,15 +227,18 @@ final class VehicleTracker {
             track.hits += 1; track.misses = 0; track.lastSeenT = t
         }
 
+        // Unmatched tracks keep their predicted position and coast (misses++).
         for index in tracks.indices where !matchedTracks.contains(index) {
             tracks[index].misses += 1
         }
 
+        // Unmatched detections spawn new tracks with a fresh ID.
         for index in detections.indices where !matchedDetections.contains(index) {
             nextID += 1; births += 1
             tracks.append(Track(id: nextID, detection: detections[index], t: t))
         }
 
+        // Log corrected ego positions in world frame for velocity / trail history.
         let keepSamples = configuration.baselineSeconds + configuration.trailSeconds
         for track in tracks {
             if track.observed {
@@ -223,21 +251,26 @@ final class VehicleTracker {
             }
         }
 
+        // Drop tracks that timed out or never earned enough hits to coast.
         tracks.removeAll { track in
             t - track.lastSeenT > configuration.holdSeconds
                 || (track.misses > 0
                     && configuration.coastMinimumHits != nil
                     && track.hits < configuration.coastMinimumHits!)
         }
+        // Remove overlapping confirmed tracks (prefer closer / more-established).
         if configuration.suppressOverlap {
             trackSuppressed += suppressTrackOverlaps()
         }
+        // Update parked / moving labels and smoothed output velocity.
         labelStates(at: t)
+        // Return only tracks with enough consecutive hits for downstream consumers.
         return confirmed(at: t)
     }
 
     // MARK: Prediction and association
-
+    
+    // Propagate every track forward using estimated velocity and ego-motion compensation.
     private func predict(_ ego: EgoDelta) {
         let dt = max(ego.dt, 1e-3)
         let c = cos(-ego.dyaw), s = sin(-ego.dyaw)
@@ -252,6 +285,7 @@ final class VehicleTracker {
         }
     }
 
+    // Globally assign detections to tracks by minimum gated normalized distance.
     private func match(_ detections: [Detection], dt: Double,
                        egoStep: Double) -> [(Int, Int)] {
         guard !tracks.isEmpty, !detections.isEmpty else { return [] }
@@ -269,11 +303,13 @@ final class VehicleTracker {
         return HungarianAssignment.solve(costs).filter { costs[$0.0][$0.1] < limit }
     }
 
+    // Association search radius in metres, widened for longer dt and missed frames.
     private func gateMetres(dt: Double, misses: Int = 0) -> Double {
         (configuration.gateFloor + configuration.gateSpeed * max(dt, 0))
             * Double(1 + misses)
     }
 
+    // Range-dependent radial and lateral uncertainty sigmas at a bearing (x, y).
     private func sigmas(x: Double, y: Double) -> (radial: Double, lateral: Double, range: Double) {
         let range = hypot(x, y)
         return (configuration.sigmaRadialA + configuration.sigmaRadialB * range,
@@ -281,6 +317,7 @@ final class VehicleTracker {
                 range)
     }
 
+    // Extra gate slack when we lack a velocity estimate and ego moved this frame.
     private func motionSigma(_ track: Track, _ egoStep: Double) -> Double {
         if configuration.predictionObservations != nil {
             return worldVelocity(track, over: configuration.baselineSeconds) == nil ? egoStep : 0
@@ -288,6 +325,7 @@ final class VehicleTracker {
         return predictionVelocity(track) == nil ? egoStep : 0
     }
 
+    // Mahalanobis-style track–detection distance in radial/lateral bearing coordinates.
     private func normalizedDistance(_ track: Track, _ detection: Detection,
                                     _ egoStep: Double) -> Double {
         let dx = detection.x - track.x, dy = detection.y - track.y
@@ -307,6 +345,7 @@ final class VehicleTracker {
 
     // MARK: Velocity and state
 
+    // World velocity used to predict the next track position before association.
     private func predictionVelocity(_ track: Track) -> SIMD2<Double>? {
         if let count = configuration.predictionObservations {
             return worldVelocity(track, observations: count)
@@ -314,6 +353,7 @@ final class VehicleTracker {
         return worldVelocity(track, over: configuration.baselineSeconds)
     }
 
+    // World velocity used to classify parked vs moving and smooth output speed.
     private func stateVelocity(_ track: Track) -> SIMD2<Double>? {
         if let count = configuration.stateObservations {
             return fittedWorldVelocity(track, observations: count)
@@ -321,24 +361,28 @@ final class VehicleTracker {
         return worldVelocity(track, over: configuration.baselineSeconds)
     }
 
+    // Track world velocity rotated into the current ego frame for prediction.
     private func egoVelocity(_ track: Track) -> SIMD2<Double>? {
         if track.state == .parked { return .zero }
         guard let velocity = predictionVelocity(track) else { return nil }
         return rotateToEgo(velocity)
     }
 
+    // Smoothed world velocity rotated into ego frame for public output.
     private func outputVelocity(_ track: Track) -> SIMD2<Double>? {
         if track.state == .parked { return .zero }
         guard let velocity = track.outputWorldVelocity else { return nil }
         return rotateToEgo(velocity)
     }
 
+    // Rotate a world-frame velocity vector into the current ego frame.
     private func rotateToEgo(_ velocity: SIMD2<Double>) -> SIMD2<Double> {
         let c = cos(-pose.yaw), s = sin(-pose.yaw)
         return SIMD2(c * velocity.x - s * velocity.y,
                      s * velocity.x + c * velocity.y)
     }
 
+    // Average world speed over the oldest sample within a time baseline window.
     private func worldVelocity(_ track: Track, over baseline: Double) -> SIMD2<Double>? {
         guard track.world.count >= 2, let end = track.world.last else { return nil }
         let cutoff = end.t - baseline
@@ -353,6 +397,7 @@ final class VehicleTracker {
         return SIMD2((end.x - start.x) / span, (end.y - start.y) / span)
     }
 
+    // Average world speed over the last N world samples.
     private func worldVelocity(_ track: Track, observations: Int) -> SIMD2<Double>? {
         guard observations >= 2, track.world.count >= observations,
               let end = track.world.last else { return nil }
@@ -362,6 +407,8 @@ final class VehicleTracker {
         return SIMD2((end.x - start.x) / span, (end.y - start.y) / span)
     }
 
+    // Least-squares world velocity fit over the last N world samples.
+    //least squares of the plot of position vs time slope is velocity
     private func fittedWorldVelocity(_ track: Track, observations: Int) -> SIMD2<Double>? {
         guard observations >= 2, track.world.count >= observations else { return nil }
         let samples = track.world.suffix(observations)
@@ -376,6 +423,7 @@ final class VehicleTracker {
         return SIMD2(vx, vy)
     }
 
+    // Update each track's motion state and exponentially smoothed output velocity.
     private func labelStates(at t: Double) {
         for track in tracks {
             if t - track.lastSeenT > configuration.coastFreezeSeconds { continue }
@@ -404,12 +452,14 @@ final class VehicleTracker {
         }
     }
 
+    // Time span covered by the world samples used for state velocity.
     private func velocitySpan(_ track: Track) -> Double? {
         guard let observations = configuration.stateObservations,
               track.world.count >= observations, let last = track.world.last else { return nil }
         return max(last.t - track.world[track.world.count - observations].t, 1e-3)
     }
 
+    // Speed below which a track is considered parked, scaled by range uncertainty.
     private func parkedThreshold(_ track: Track, span: Double?) -> Double {
         let sigma = sigmas(x: track.x, y: track.y).radial
         let baseline = span ?? configuration.baselineSeconds
@@ -419,6 +469,7 @@ final class VehicleTracker {
 
     // MARK: Shapes and overlap suppression
 
+    // Pick a stable box size closest to the median of recent shape observations.
     private func robustShape(_ shapes: [Shape]) -> Shape {
         func median(_ values: [Double]) -> Double {
             let sorted = values.sorted()
@@ -434,12 +485,14 @@ final class VehicleTracker {
         }!.element
     }
 
+    // Log-space L1 distance between two box dimensions.
     private func shapeDistance(_ shape: Shape, _ target: Shape) -> Double {
         abs(log(max(shape.length, 1e-3) / max(target.length, 1e-3)))
             + abs(log(max(shape.width, 1e-3) / max(target.width, 1e-3)))
             + abs(log(max(shape.height, 1e-3) / max(target.height, 1e-3)))
     }
 
+    // Remove overlapping detections, keeping nearer and higher-confidence boxes.
     private func filterOverlapping(_ detections: [Detection])
         -> (detections: [Detection], removed: Int) {
         guard detections.count >= 2 else { return (detections, 0) }
@@ -466,6 +519,7 @@ final class VehicleTracker {
         return (indices.map { detections[$0] }, detections.count - indices.count)
     }
 
+    // Drop overlapping tracks, keeping nearer and more-established ones.
     private func suppressTrackOverlaps() -> Int {
         guard tracks.count >= 2 else { return 0 }
         let ordered = tracks.sorted { lhs, rhs in
@@ -491,12 +545,14 @@ final class VehicleTracker {
         return dropped.count
     }
 
+    // Map object labels into overlap-suppression families (car, truck, other).
     private static func family(_ label: Int) -> Int {
         if label == 3 { return 1 }
         if label == 2 { return 2 }
         return 0
     }
 
+    // Four ego-frame corners of an oriented bounding box.
     private static func corners(x: Double, y: Double, yaw: Double,
                                 length: Double, width: Double) -> [SIMD2<Double>] {
         let c = cos(yaw), s = sin(yaw)
@@ -508,6 +564,7 @@ final class VehicleTracker {
         }
     }
 
+    // True if two oriented rectangles overlap (separating-axis test).
     private static func overlap(_ a: [SIMD2<Double>], _ b: [SIMD2<Double>]) -> Bool {
         for quad in [a, b] {
             for i in quad.indices {
@@ -523,6 +580,7 @@ final class VehicleTracker {
 
     // MARK: Public output
 
+    // Convert confirmed internal tracks into public TrackedVehicle output structs.
     private func confirmed(at t: Double) -> [TrackedVehicle] {
         tracks.filter { $0.hits >= configuration.confirmHits }.map { track in
             let velocity = outputVelocity(track)
@@ -551,6 +609,7 @@ final class VehicleTracker {
         }
     }
 
+    // Wrap an angle to (-π, π].
     private static func wrap(_ angle: Double) -> Double {
         var value = (angle + Double.pi).truncatingRemainder(dividingBy: 2 * Double.pi)
         if value < 0 { value += 2 * Double.pi }
@@ -558,9 +617,10 @@ final class VehicleTracker {
     }
 }
 
-/// Rectangular minimum-cost assignment. This is the same global optimization
-/// used by scipy's linear_sum_assignment, not a greedy nearest-neighbour pass.
+/// linear_sum_assignment equivalent from scipy
+//basically have set a have set b pick a mapping that minimizes distance between a and b
 private enum HungarianAssignment {
+    // Find the lowest-cost one-to-one row/column assignment in a cost matrix.
     static func solve(_ costs: [[Double]]) -> [(Int, Int)] {
         guard let columns = costs.first?.count, !costs.isEmpty, columns > 0 else { return [] }
         if costs.count <= columns { return solveRows(costs) }
@@ -568,6 +628,7 @@ private enum HungarianAssignment {
         return solveRows(transposed).map { ($0.1, $0.0) }.sorted { $0.0 < $1.0 }
     }
 
+    // Hungarian algorithm core for the rows ≤ columns case.
     private static func solveRows(_ a: [[Double]]) -> [(Int, Int)] {
         let n = a.count, m = a[0].count
         var u = [Double](repeating: 0, count: n + 1)

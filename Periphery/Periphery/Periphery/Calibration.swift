@@ -54,7 +54,7 @@ struct Calibration {
     var forwardOfOrigin: Double { pose.forwardOfOrigin }
 
     // MARK: - Mount pose
-
+    //this is the transform from the vehicle frame to the sensor frame
     var sensorTVehicle: simd_double4x4 {
         let rotation = Self.vehicleToSensor(pitch: pose.pitch, roll: pose.roll, yaw: pose.yaw)
         let camera = SIMD3<Double>(pose.forwardOfOrigin, 0.0, pose.height)
@@ -89,6 +89,7 @@ struct Calibration {
         return rx * ry * rz
     }
 
+    //take a real 3d point in car coords and turn it into a 2d point in the image
     func sourcePoint(_ vehicle: SIMD3<Double>) -> SIMD2<Double>? {
         let rotation = Self.vehicleToSensor(pitch: pose.pitch, roll: pose.roll, yaw: pose.yaw)
         let camera = SIMD3<Double>(pose.forwardOfOrigin, 0.0, pose.height)
@@ -99,7 +100,7 @@ struct Calibration {
     }
 
     // MARK: - Focal matching
-
+    //match the focal we trained on tot he focal we have
     func focalMatchedCrop(targetFocal: Double = Contract.trainedFocal) -> ImageCrop {
         let scale = targetFocal / K[0][0]
         var cropW = Int((Double(Contract.inputWidth) / scale).rounded())
@@ -125,6 +126,7 @@ struct Calibration {
 
     /// Source intrinsics carried through the crop and the letterbox resize onto
     /// the network canvas.
+    //basically updates matrix K with the crop and the resize
     func adjustedIntrinsics(for crop: ImageCrop) -> simd_double3x3 {
         var adjusted = K
         // Crop is a principal-point shift.

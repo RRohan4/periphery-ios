@@ -64,9 +64,6 @@ final class FramePipeline: @unchecked Sendable {
     private var gravityPitch: Double = 0
     /// Live operating point. Written from the Calibrate tab, read here.
     private var scoreThreshold = Contract.scoreThreshold
-    /// Reject boxes whose decoded dimensions are not a vehicle. Off in the
-    /// goldens, on live -- see Decode.plausible.
-    private var rejectImplausible = true
     /// Hand the camera estimate to the pose without a person asking, once it
     /// has converged.
     private var autoApplyFOE = true
@@ -137,9 +134,6 @@ final class FramePipeline: @unchecked Sendable {
 
     func setScoreThreshold(_ value: Double) { scoreThreshold = value }
     var currentScoreThreshold: Double { scoreThreshold }
-
-    func setRejectImplausible(_ value: Bool) { rejectImplausible = value }
-    var currentRejectImplausible: Bool { rejectImplausible }
 
     func setAutoApplyFOE(_ value: Bool) { autoApplyFOE = value }
     var currentAutoApplyFOE: Bool { autoApplyFOE }
@@ -266,9 +260,7 @@ final class FramePipeline: @unchecked Sendable {
                 egoMotion: egoMotion.delta(at: CMTimeGetSeconds(frame.presentationTime)))
             let result = try engine.process(
                 frame: perceptionFrame,
-                configuration: PerceptionConfiguration(
-                    scoreThreshold: scoreThreshold,
-                    rejectImplausible: rejectImplausible))
+                configuration: PerceptionConfiguration(scoreThreshold: scoreThreshold))
             let crop = result.calibration.crop
             snapshot.focal = result.calibration.focal
             snapshot.calibration = result.calibration

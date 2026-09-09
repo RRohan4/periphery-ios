@@ -67,11 +67,6 @@ private enum Help {
         Roughly a third of the boxes at that threshold are false, and that is \
         the model, not a bug in the decode — raise the threshold to trade \
         recall for a cleaner view.
-
-        The shape filter is separate and cheap. The box coder exponentiates its \
-        size codes, so a confident candidate can decode to a fourteen-metre car \
-        or a box floating two metres off the road. Those are impossible rather \
-        than merely unlikely, so they are dropped regardless of score.
         """
     static let focus = """
         Not cosmetic. Optical flow is built from local intensity differences and         blur is a low-pass filter, so a soft image starves the pitch estimator         long before it bothers the detector.
@@ -277,7 +272,6 @@ struct CalibrationView: View {
                           model.scoreThreshold - Contract.scoreThreshold))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Toggle("Drop impossible box shapes", isOn: $model.rejectImplausible)
             LabeledContent("drawn now", value: "\(snapshot.detections.count) boxes")
         } header: {
             Text("Detections")
@@ -519,9 +513,6 @@ final class CalibrationModel: ObservableObject {
     @Published var calibrator = HeightCalibrator()
     @Published var scoreThreshold: Double = Contract.scoreThreshold
     @Published var lensPosition: Double = 1.0
-    @Published var rejectImplausible = true {
-        didSet { pipeline.setRejectImplausible(rejectImplausible) }
-    }
     @Published var autoApplyFOE = true {
         didSet { pipeline.setAutoApplyFOE(autoApplyFOE) }
     }
@@ -548,7 +539,6 @@ final class CalibrationModel: ObservableObject {
         height = pipeline.currentPose.height
         scoreThreshold = pipeline.currentScoreThreshold
         lensPosition = Double(pipeline.camera.lensPosition)
-        rejectImplausible = pipeline.currentRejectImplausible
         autoApplyFOE = pipeline.currentAutoApplyFOE
         // The altimeter stream already feeds the recorder; tee it here too
         // rather than opening a second CMAltimeter.

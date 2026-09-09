@@ -19,7 +19,6 @@ struct PerceptionFrame {
 
 struct PerceptionConfiguration {
     var scoreThreshold = Contract.scoreThreshold
-    var rejectImplausible = true
 }
 
 struct PerceptionCalibrationSnapshot {
@@ -46,7 +45,14 @@ final class PerceptionEngine {
     init() throws {
         preprocessor = try Preprocessor()
     }
-
+    /*
+    
+    1. calibrate from frame mount and intrinsics and whatnot
+    2. if nothing has changed dont bother 
+    3. preprocess image 
+    4. run detector (backbone, projection lut gather, head, decode)
+    5. track vehicles
+    */
     func process(frame: PerceptionFrame,
                  configuration: PerceptionConfiguration = PerceptionConfiguration()) throws
         -> PerceptionResult {
@@ -59,8 +65,7 @@ final class PerceptionEngine {
         let input = try preprocessor.fill(from: frame.pixelBuffer, crop: crop)
         let detections = try detector.detect(
             image: input,
-            scoreThreshold: configuration.scoreThreshold,
-            rejectImplausible: configuration.rejectImplausible)
+            scoreThreshold: configuration.scoreThreshold)
 
         let frameInterval = lastTimestamp.map { frame.timestamp - $0 }
         let discontinuous = !frame.timestamp.isFinite

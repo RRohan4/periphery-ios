@@ -223,18 +223,16 @@ final class FocusOfExpansion: @unchecked Sendable {
         defer { previous = current; previousTime = time }
         guard let first = previous else { return }
         let dt = time - previousTime
-        // A stale pair -- the app was backgrounded, or frames were dropped --
-        // is not a measurement.
+        //stale pair
         guard dt > 0.01, dt < 0.5 else { return }
 
-        // Average the gyro over exactly this interval. Rotation is the one
-        // thing that can move the focus of expansion without the car turning.
+        // Average the gyro over exactly this interval. 
         let w = averageRotationRate(from: previousTime, to: time)
 
         let wCam = SIMD3<Double>(-w.y, -w.x, -w.z)
 
         let yawRate = abs(wCam.y) * 180.0 / .pi
-        guard yawRate <= gates.maxYawRateDegrees else {
+        guard yawRate <= gates.maxYawRateDegrees else { //gaurd off high yaw rates
             publishGate(String(format: "turning %.1f deg/s", yawRate))
             return
         }
@@ -245,6 +243,7 @@ final class FocusOfExpansion: @unchecked Sendable {
         }
         var points = [SIMD2<Double>]()
         var vectors = [SIMD2<Double>]()
+        //sample gets the points and vectors associated with the points
         sample(flow: flow, points: &points, vectors: &vectors)
         guard points.count > 3 * Self.minInliers else {
             record(accepted: false)
@@ -252,16 +251,15 @@ final class FocusOfExpansion: @unchecked Sendable {
             return
         }
 
+        //derotate removes the rotation from the points and vectors
         let derotated = derotate(points: points, vectors: vectors, omega: wCam, dt: dt)
         guard let fit = ransac(points: points, vectors: derotated) else {
             record(accepted: false)
-            // The night failure mode lands exactly here: plenty of flow, no
-            // agreement about where it comes from.
+            // The night failure mode lands here
             publishGate("no consensus (\(points.count) vectors)")
             return
         }
-        // The same fit without the rotation correction, as a running check on
-        // the axis mapping above. Diagnostic only -- never fed to the pose.
+        // The same fit without the rotation correction
         let rawFit = ransac(points: points, vectors: vectors)
 
         let angles = pitchAndYaw(foe: fit.foe, roll: roll)
@@ -320,13 +318,20 @@ final class FocusOfExpansion: @unchecked Sendable {
 
     // MARK: - RANSAC
 
+
+    // Pick 2 random flow lines (not a big subset — just 2).
+    // Intersect them → one candidate FoE point.
+    // Vote: count how many other lines pass near that point (within 2 px).
+    // Repeat 200 times; keep the candidate with the most votes → seedPoint.
     private func ransac(points: [SIMD2<Double>],
                         vectors: [SIMD2<Double>],
                         iterations: Int = 200,
                         threshold: Double = 2.0) -> (foe: SIMD2<Double>, inliers: Int)? {
         let n = points.count
+        // Need enough vectors before RANSAC can meaningfully vote.
         guard n >= Self.minInliers else { return nil }
 
+        // Each flow vector becomes a line (normal + offset); FoE lies where most intersect.
         var normals = [SIMD2<Double>]()
         var offsets = [Double]()
         normals.reserveCapacity(n)
@@ -339,14 +344,17 @@ final class FocusOfExpansion: @unchecked Sendable {
             offsets.append(normal.x * points[i].x + normal.y * points[i].y)
         }
         let count = normals.count
+        // Zero-length vectors were dropped; check we still have a crowd to vote with.
         guard count >= Self.minInliers else { return nil }
 
+        // Deterministic PRNG for picking random line pairs each iteration.
         var seed: UInt64 = 0x9E3779B97F4A7C15
         func next(_ bound: Int) -> Int {
             seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
             return Int(seed % UInt64(bound))
         }
 
+        // Hypothesize: two lines -> candidate FoE. Vote: count agreeing lines.
         var best: SIMD2<Double>?
         var bestCount = 0
         for _ in 0..<iterations {
@@ -365,8 +373,10 @@ final class FocusOfExpansion: @unchecked Sendable {
             }
             if votes > bestCount { bestCount = votes; best = candidate }
         }
+        // No hypothesis reached minInliers -- scene had flow but no shared convergence point.
         guard let seedPoint = best, bestCount >= Self.minInliers else { return nil }
 
+        // Refine: least-squares FoE from all inliers of the best hypothesis.
         var m00 = 0.0, m01 = 0.0, m11 = 0.0, r0 = 0.0, r1 = 0.0
         var inliers = 0
         for i in 0..<count {
@@ -378,6 +388,7 @@ final class FocusOfExpansion: @unchecked Sendable {
             inliers += 1
         }
         let determinant = m00 * m11 - m01 * m01
+        // Singular fit falls back to the raw RANSAC winner rather than failing entirely.
         guard inliers >= Self.minInliers, abs(determinant) > 1e-9 else {
             return (seedPoint, bestCount)
         }

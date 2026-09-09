@@ -29,8 +29,7 @@ enum Decode {
                            directions: UnsafePointer<Float>,
                            anchors: [Contract.Anchor],
                            scoreThreshold: Double = Contract.scoreThreshold,
-                           nmsRadius: Double = Contract.nmsRadius,
-                           rejectImplausible: Bool = false) -> [Detection] {
+                           nmsRadius: Double = Contract.nmsRadius) -> [Detection] {
         var candidates = [Detection]()
         let numClasses = Contract.classNames.count
 
@@ -47,6 +46,7 @@ enum Decode {
                   Contract.vehicleLabels.contains(label) else { continue }
 
             // 3. anchor decode to a grid box.
+            //the small adjustments to the anchors happen here btw
             let code = boxes + i * 9
             let anchor = anchors[i]
             let grid = decodeBox(code: code, anchor: anchor)
@@ -61,39 +61,17 @@ enum Decode {
             guard detection.length > 0, detection.width > 0, detection.height > 0,
                   detection.x.isFinite, detection.y.isFinite, detection.z.isFinite,
                   detection.yaw.isFinite else { continue }
-            // 6. evaluation region. Outside it, a box is a decode artefact.
+            // 6. trained detection region; outside it is a decode artefact.
             guard detection.x >= Contract.forwardRange.min,
                   detection.x <= Contract.forwardRange.max,
                   detection.y >= Contract.lateralRange.min,
                   detection.y <= Contract.lateralRange.max else { continue }
-            // 7. is it shaped like the thing it claims to be?
-            if rejectImplausible, !plausible(detection) { continue }
 
             candidates.append(detection)
         }
 
+        // 7. circular NMS at the contract radius.
         return circularNMS(candidates, radius: nmsRadius)
-    }
-
-    static func plausible(_ detection: Detection) -> Bool {
-        let bounds: (length: ClosedRange<Double>, width: ClosedRange<Double>,
-                     height: ClosedRange<Double>)
-        switch Contract.classNames[detection.label] {
-        case "large_vehicle": bounds = (4.0...20.0, 1.8...3.2, 1.8...4.5)
-        case "two_wheeler":   bounds = (1.0...3.2, 0.3...1.4, 0.8...2.2)
-        case "pedestrian":    bounds = (0.2...1.2, 0.2...1.2, 1.0...2.2)
-        default:              bounds = (2.5...7.0, 1.3...2.6, 1.0...2.6)
-        }
-        guard bounds.length.contains(detection.length),
-              bounds.width.contains(detection.width),
-              bounds.height.contains(detection.height) else { return false }
-        // A box whose base is far off the road plane is a projection artefact,
-        // not a vehicle. z is the CENTRE, so the base sits at z - h/2.
-        let base = detection.z - detection.height / 2
-        guard base > -1.5, base < 1.5 else { return false }
-        // Wheels-on-ground vehicles are longer than they are wide. A box that
-        // is wider than it is long is a fit to something that is not a vehicle.
-        return detection.length >= detection.width * 0.9
     }
 
     // MARK: - Steps
@@ -108,8 +86,10 @@ enum Decode {
         var x, y, zBottom, w, l, h, yaw: Double
     }
 
-    /// DeltaXYZWLHRBBoxCoder, matching contract.decode_boxes. Codes 7 and 8 are
+    ///  matching contract.decode_boxes. Codes 7 and 8 are
     /// the unused velocity slots and are never read.
+
+    //this just applys the tiny adjustments of the anchors to the box
     static func decodeBox(code: UnsafePointer<Float>, anchor: Contract.Anchor) -> GridBox {
         let diagonal = anchor.diagonal
         let centerZ = anchor.z + anchor.h / 2.0
@@ -125,6 +105,7 @@ enum Decode {
     }
 
     /// mmdet3d's half-period fold, then the predicted half turn.
+    //combine everything into one yaw from heading direction to tiny adjustment
     static func gridYaw(rotation: Double, direction: Double) -> Double {
         let period = Double.pi
         var folded = rotation - Contract.dirOffset
