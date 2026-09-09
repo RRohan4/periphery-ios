@@ -6,7 +6,7 @@ Periphery runs the Safety40 detector on-device, converts camera frames into
 vehicle-frame detections, tracks vehicles over time, and renders the result as
 a 2.5D bird's-eye view beside the camera feed.
 
-![Periphery replay view](assets/periphery-replay-cropped.png)
+![Periphery live demo](assets/periphery-demo.gif)
 
 ## Key results
 
