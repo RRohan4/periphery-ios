@@ -144,12 +144,13 @@ already-produced results so they can be tuned without rerunning inference.
 
 ## Tracking and display boundaries
 
-The tracker uses range-dependent localization error when associating detections:
-
-```text
-radial sigma  = 0.18 + 0.0123 × range
-lateral sigma = 0.08 + 0.005  × range
-```
+Association is gated in standard deviations rather than metres. Detector
+localization error is anisotropic and grows with range — depth is several times
+worse than bearing, because bearing is where the object sits in the image while
+depth is regressed against a learned size prior — so the gate is an ellipse
+elongated along the line of sight that widens with distance. The same model sets
+the parked/moving threshold, which keeps that test at constant confidence instead
+of a constant speed. Coefficients live in `VehicleTracker.swift`.
 
 ## Repository boundaries
 
