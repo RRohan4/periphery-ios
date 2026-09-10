@@ -134,10 +134,6 @@ MotionSource                                      pose and ego motion for that t
 | lateral offset | measured once |
 | trained focal, 565.6 px at 512 px wide | fixed by the checkpoint |
 
-`Calibration.swift` composes them into the 3x4 matrix the projection LUT
-consumes, dividing by the backbone stride so the table indexes the feature map
-rather than the image.
-
 | wrong about | range error grows | notes |
 |---|---|---|
 | **pitch** | **quadratic**, `dr/dtheta ~ r^2 / h` | the dominant term; 1.0 deg costs 16-23 F1 points |
