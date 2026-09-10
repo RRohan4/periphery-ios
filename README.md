@@ -21,9 +21,9 @@ The current system has demonstrated:
 | Median yaw error | 3.2° |
 | iPhone 16 inference latency | 3.9 ms median, 7.9 ms p95 |
 
-The held-out metrics use a 555-frame evaluation over 0–40 m at the 0.60
-display threshold. The latency measurement is the detector pipeline after
-warm-up; it does not include camera preprocessing.
+The held-out Cityscapes metrics use a 555-frame evaluation over 0–40 m at the
+0.60 display threshold. The latency measurement is the detector pipeline after
+warm-up.
 
 ## The idea
 
@@ -87,70 +87,67 @@ vehicle-frame detections
 ```
 
 The gather is an index operation driven by the camera calibration, so it stays
-outside the Core ML graph. Keeping decode in Swift also makes the final
-post-processing path explicit and testable instead of relying on runtime-
-specific graph behaviour.
+outside the Core ML graph.
 
 ## How the iOS code fits together
 
 ```text
-CameraSession + MotionSource
+CameraSession.captureOutput                       a camera frame arrives
+MotionSource                                      pose and ego motion for that timestamp
+│
+└─ FramePipeline                                  packs both into a PerceptionFrame
+   │
+   └─ PerceptionEngine.process(frame:)            ── everything below is this one call
+      │
+      ├─ calibrate(for:)                          mount pose + intrinsics
+      │  └─ Detector.updateCalibration()          only when the pose or optics moved;
+      │     └─ ProjectionLUT(projection:)         rebuilds the 6,560-voxel table
+      │
+      ├─ calibration.focalMatchedCrop()           the crop that hits 565.6 px focal
+      │
+      ├─ Preprocessor.fill(from:crop:)            CVPixelBuffer -> MLMultiArray
+      │                                           returns [1,3,256,512] float32
+      │
+      ├─ Detector.detect(image:)                  takes that array
+      │  ├─ run(backbone)                         -> features [1,64,64,128]
+      │  ├─ gather()                              -> volume   [1,64,41,80,2]
+      │  │  └─ ProjectionLUT.backproject()        the calibration-dependent index copy
+      │  ├─ run(head)                             -> classes / boxes / directions
+      │  └─ Decode.detections(...)                -> [Detection] in vehicle metres
+      │
+      └─ VehicleTracker.step(detections:ego:)     -> [TrackedObject] with stable ids
+         │
+         └─ returns PerceptionResult
             │
-            ▼
-        FramePipeline
-            │
-            ▼
-      PerceptionEngine
-            │
-   ┌────────┼────────┐
-   ▼        ▼        ▼
-Preprocess Detector  Decode
-             │        │
-             └────┬───┘
-                  ▼
-           VehicleTracker
-                  │
-                  ▼
-       PerceptionVisualization
-            ┌─────┴─────┐
-            ▼           ▼
-        WorldView   camera overlay
+            └─ PerceptionVisualization            consumed by WorldView and the
+                                                  camera overlay
 ```
-
-`CameraSession` owns camera frame delivery and per-frame intrinsics.
-`MotionSource` owns CoreMotion, CoreLocation, heading, and the barometer.
-`FramePipeline` combines those inputs into a source-neutral frame.
-
-`PerceptionEngine` is a backend that can work with live or recorded video. It
-runs preprocessing, the detector, decode, and tracking.
-
-`VehicleTracker` associates detections over time and maintains position,
-dimensions, heading, motion state, velocity, and trails.
 
 ## Geometry and calibration
 
-`Calibration.swift` owns the transform from vehicle coordinates to the sensor
-and image frames. It handles the mount pose, per-frame camera intrinsics,
-focal-matched cropping, network projection, source-frame projection, and ground
-guides.
+| quantity | where it comes from |
+|---|---|
+| mount pitch and yaw | focus-of-expansion estimator, gyro-de-rotated |
+| mount roll | gravity, from CoreMotion |
+| camera height | measured once |
+| camera intrinsics | per-frame from AVFoundation |
+| lateral offset | measured once |
+| trained focal, 565.6 px at 512 px wide | fixed by the checkpoint |
 
-The model was trained at approximately 565.6 px focal length on a 512 px-wide
-input. The source image is cropped and letterboxed to preserve that apparent
-scale.
+`Calibration.swift` composes them into the 3x4 matrix the projection LUT
+consumes, dividing by the backbone stride so the table indexes the feature map
+rather than the image.
 
-Camera height primarily scales the recovered range. Camera lateral offset
-translates the coordinate origin. The replay demo applies those adjustments to
-already-produced results so they can be tuned without rerunning inference.
+| wrong about | range error grows | notes |
+|---|---|---|
+| **pitch** | **quadratic**, `dr/dtheta ~ r^2 / h` | the dominant term; 1.0 deg costs 16-23 F1 points |
+| height | linear scale factor | recovered range scales directly with it |
+| focal / crop | linear scale factor | a crop that misses 565.6 px rescales every range |
+| yaw | linear in range, lateral | a yaw error `theta` puts a target at `r * theta` sideways |
+| lateral offset | constant | translates the origin |
 
-## Tracking and display boundaries
-
-Association is gated in standard deviations rather than metres. Detector
-localization error is anisotropic and grows with range — depth is several times
-worse than bearing, because bearing is where the object sits in the image while
-depth is regressed against a learned size prior — so the gate is an ellipse
-elongated along the line of sight that widens with distance. The same model sets
-the parked/moving threshold, which keeps that test at constant confidence instead
-of a constant speed. Coefficients live in `VehicleTracker.swift`.
+Only pitch grows with the square of range, which is why it became its own
+subsystem rather than a one-time measurement.
 
 ## Repository boundaries
 
